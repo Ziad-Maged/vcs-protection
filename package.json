@@ -1,0 +1,44 @@
+{
+  "name": "vcs-protection",
+  "version": "1.0.0",
+  "description": "This is a package designed to implement protection rules for git repositories locally on the machine and allow for integration with GitHub.",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "bin": {
+    "vcs-protection": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "keywords": [
+    "git",
+    "hooks",
+    "branch-protection",
+    "github",
+    "pull-request"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && vitest run",
+    "test:unit": "vitest run test/unit",
+    "prepublishOnly": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "picomatch": "^4.0.7",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/picomatch": "^4.0.3",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
