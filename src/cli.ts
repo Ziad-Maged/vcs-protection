@@ -109,4 +109,9 @@ program
   .description('internal: run by the GitHub Actions guard workflow')
   .action(action(async () => (await import('./commands/ciGuard.js')).ciGuard()));
 
+program
+  .command('postinstall', { hidden: true })
+  .description('internal: run by the npm postinstall script to set up hooks automatically')
+  .action(action(async () => (await import('./commands/postinstall.js')).postinstall()));
+
 await program.parseAsync(process.argv);

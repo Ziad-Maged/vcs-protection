@@ -46,18 +46,28 @@ VCS_PROTECTION_BYPASS="initial setup" git push
 
 On GitHub, check that **Settings → Actions → General → Workflow permissions** is set to **Read and write permissions**. The guard needs it to revert pushes and open issues.
 
-### Every teammate (once per clone)
+### Every teammate: automatic on `npm install`
 
-```sh
-npm i -g vcs-protection
-vcs-protection init
-```
+The package has a `postinstall` script, so nobody has to run `init` by hand:
 
-Or run it once per machine so that every future clone gets the hooks automatically:
+- **Node.js projects (recommended):** add it as a dev dependency once and commit `package.json`. Every `npm install` / `npm ci` in a clone then installs, or refreshes, the hooks in that clone.
 
-```sh
-vcs-protection install --global
-```
+  ```sh
+  npm i -D vcs-protection
+  npm install-scripts approve vcs-protection   # npm >= 12 only: allows its postinstall script
+  ```
+
+  npm 12 blocks dependency install scripts unless they are listed in the `allowScripts` field of `package.json`; the second command adds the entry. npm 11 runs the script but prints a warning; earlier versions just run it.
+- **Global install:** `npm i -g vcs-protection` (npm >= 12: `npm i -g --allow-scripts=vcs-protection vcs-protection`) sets git's `init.templateDir`, so every future `git clone` gets the hooks. If you already have a different `init.templateDir`, it is left alone; run `vcs-protection install --global --force` to replace it. Clones that already exist still need `vcs-protection init`.
+
+The automatic setup never fails `npm install`, never creates a config, and does nothing when:
+
+- `CI` is set (CI runners, including the GitHub guard's `npx` run), or `VCS_PROTECTION_SKIP_INSTALL=1` is set,
+- npm runs with `--ignore-scripts`, or the directory is not a git repository.
+
+npm hides the output of dependency install scripts; use `npm install --foreground-scripts` to see it, or check with `vcs-protection status`. `npm uninstall` does not remove the hooks: run `vcs-protection uninstall` first.
+
+Manual setup still works: `vcs-protection init` in a clone, or `vcs-protection install --global` once per machine.
 
 The hooks do nothing in repositories that have no `.vcs-protection.json`.
 

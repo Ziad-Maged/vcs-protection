@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "scripts",
     "README.md"
   ],
   "engines": {
@@ -27,6 +28,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && vitest run",
     "test:unit": "vitest run test/unit",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {

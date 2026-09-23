@@ -1,6 +1,6 @@
 # vcs-protection: pre-publish end-to-end test workflow
 
-This guide tests every command of `vcs-protection` against a real GitHub repository before the package goes to npm. It starts with building the tarball and ends with a publish checklist.
+This guide tests every command of `vcs-protection` against a real GitHub repository before the package goes to npm. It starts with building the tarball and ends with a publish checklist. It also covers the automatic setup that the package's npm `postinstall` script performs (Phase 2.3 for global installs, Phase 6.3–6.4 for installs as a project dependency).
 
 - **Test subject:** your personal Express + MongoDB Atlas server repository on GitHub.
 - **People:** "you" (the repo owner, `<you>`) and a second GitHub account (`<reviewer>`) who approves pull requests.
@@ -25,9 +25,15 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | `github setup`, `github setup --pin` | 12 |
 | `audit`, `audit --since --limit`, `audit` without a token | 12 |
 | `install --global`, `install --global --force` | 6 |
+| Automatic setup on `npm i -g` (sets `init.templateDir`; leaves a foreign one alone) | 2, 6 |
+| Automatic setup on `npm install` as a dependency (hooks → `node_modules` copy), `npm ci` on a fresh clone | 6 |
+| `npm install-scripts approve` / `--allow-scripts` (npm ≥ 12) | 2, 6 |
+| Opt-outs: `VCS_PROTECTION_SKIP_INSTALL=1`, `CI=true`, `--ignore-scripts` | 6 |
+| `npm uninstall` leaves hooks behind; shim falls back to the global CLI | 6 |
 | `uninstall`, `uninstall --global` | 7, 14 |
 | `hook <name>` (internal, called manually) | 7 |
 | `ci-guard` (internal; in Actions, and manually) | 4, 8, 10, 13 |
+| `postinstall` (internal; run by npm) | 2, 6 |
 | `VCS_PROTECTION_BYPASS` + audit log | 4, 5 |
 | Git hooks: reference-transaction, pre-commit, pre-merge-commit, pre-push, post-checkout, post-merge | 5, 7 |
 
@@ -38,6 +44,7 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | Requirement | Check |
 |---|---|
 | Node.js ≥ 22.12 | `node -v` |
+| npm (note the major version: npm ≥ 12 blocks dependency install scripts unless approved, which changes a few commands below) | `npm -v` |
 | git ≥ 2.28 (Git for Windows) | `git --version` |
 | GitHub CLI, logged in as `<you>` | `gh auth status` (otherwise `gh auth login`) |
 | Second GitHub account `<reviewer>` | You can sign in to it in a private browser window |
@@ -67,6 +74,16 @@ $env:WORK = "$HOME\vcsp-e2e"
 New-Item -ItemType Directory -Force $env:WORK
 ```
 
+The automatic setup changes git's global `init.templateDir`. Save the current value first, so you can restore it in Phase 14 (an empty file means it was unset):
+
+```bash
+git config --global init.templateDir > "$WORK/templateDir.bak"; cat "$WORK/templateDir.bak"
+```
+
+**PS:** `git config --global init.templateDir | Set-Content "$env:WORK\templateDir.bak"`
+
+If this prints `…/.vcs-protection/git-template`, an earlier test run left it behind. Run `vcs-protection uninstall --global` (or delete the line from `~/.gitconfig`) and save the value again, so Phase 2.3 tests a clean first install.
+
 ---
 
 ## 2. Build, test and package
@@ -85,8 +102,8 @@ npm test
 **Expected:** `typecheck` prints nothing and exits 0. `npm test` builds `dist/cli.js`, then shows:
 
 ```
-Test Files  4 passed (4)
-     Tests  50 passed (50)
+Test Files  5 passed (5)
+     Tests  60 passed (60)
 ```
 
 - [ ] passed
@@ -97,18 +114,42 @@ Test Files  4 passed (4)
 npm pack --dry-run
 ```
 
-**Expected:** exactly 3 files (`README.md`, `dist/cli.js`, `package.json`). `total files: 3`, and the unpacked size is about 1.1 MB. No `src/`, `test/` or `workflow.md`.
+**Expected:** exactly 4 files (`README.md`, `dist/cli.js`, `package.json`, `scripts/postinstall.mjs`). `total files: 4`, and the unpacked size is about 1.1 MB. No `src/`, `test/`, `Workflow.md` or `Documentation.md`.
+
+Check that the lifecycle script is declared:
+
+```bash
+npm pkg get scripts.postinstall
+```
+
+**Expected:** `"node scripts/postinstall.mjs"`.
 
 - [ ] passed
 
-### 2.3 Create the tarball and install it globally
+### 2.3 Create the tarball and install it globally (automatic global setup)
 
 ```bash
 npm pack
-npm i -g ./vcs-protection-1.0.0.tgz
+npm i -g --foreground-scripts "$PKG/vcs-protection-1.0.0.tgz"
+git config --global init.templateDir
 ```
 
-**Expected:** `vcs-protection-1.0.0.tgz` is created in `PKG`, and the global install succeeds.
+npm ≥ 12 skips the install script of a package that isn't approved. For a tarball, the approval names the `file:` spec:
+
+```bash
+npm i -g --foreground-scripts "--allow-scripts=file:$PKG/vcs-protection-1.0.0.tgz" "$PKG/vcs-protection-1.0.0.tgz"
+```
+
+**PS:** `npm i -g --foreground-scripts "--allow-scripts=file:$env:PKG\vcs-protection-1.0.0.tgz" "$env:PKG\vcs-protection-1.0.0.tgz"`
+
+(`--foreground-scripts` only makes npm show the script's output; npm hides it otherwise.)
+
+**Expected:**
+- `vcs-protection-1.0.0.tgz` is created in `PKG`, and the global install succeeds.
+- The install shows `> node scripts/postinstall.mjs` followed by `✔ vcs-protection: new clones will get the git hooks automatically (init.templateDir=…/.vcs-protection/git-template).`
+- `git config --global init.templateDir` prints that directory. **From now on every new clone gets the 6 hooks without `init`** (they stay inactive in repos without a config).
+- npm 11 may add `npm warn install-scripts … not yet covered by allowScripts`. That is npm's notice, not an error. On npm ≥ 12 without the `--allow-scripts` flag you see `…had install scripts blocked…` instead, and `init.templateDir` stays unset.
+- If `init.templateDir` was already set to something else, the install prints `vcs-protection: git's init.templateDir is already set to '…'; left it unchanged.` and changes nothing (tested again in 6.6).
 
 > Installing the tarball is the closest thing to a real `npm i -g vcs-protection`. For fast code-edit loops you can use `npm link` in `PKG` instead. Re-run `npm pack` + `npm i -g` before any GitHub-side test (Phase 3.4 explains why).
 
@@ -125,7 +166,7 @@ vcs-protection protect --help
 
 **Expected:**
 - `--version` prints `1.0.0`.
-- `--help` lists `init, protect, unprotect, list, status, doctor, github, audit, install, uninstall`. The internal commands `hook` and `ci-guard` are **not** listed.
+- `--help` lists `init, protect, unprotect, list, status, doctor, github, audit, install, uninstall`. The internal commands `hook`, `ci-guard` and `postinstall` are **not** listed.
 - `github --help` lists `setup`.
 - `protect --help` shows `-a, --approvals`, `--allow-deletion`, `--no-commit` and `--no-push`.
 
@@ -193,6 +234,8 @@ curl -i http://localhost:3000/<one-of-your-routes>
 
 **PS:** `curl.exe -i http://localhost:3000/<route>` (plain `curl` in Windows PowerShell 5.1 is `Invoke-WebRequest`).
 
+Because of Phase 2.3, `alice` already has the 6 hooks from the global template (`ls .git/hooks | grep -v sample`). They do nothing yet: the repository has no `.vcs-protection.json`.
+
 **Expected:** the server logs a successful MongoDB connection, and the route returns `200` with data from Atlas. This is the **baseline**. Stop the server with Ctrl+C. Repeat this check at the end (Phase 14) to confirm the package never touched the app.
 
 - [ ] passed
@@ -235,6 +278,8 @@ yml = yml.replace(
 writeFileSync(file, yml);
 console.log('patched', file);
 ```
+
+> The runner sets `CI=true`, so installing the tarball in Actions skips the automatic hook setup (nothing is written to the runner's checkout). GitHub's runners currently ship npm 10 or 11; if a runner ever has npm ≥ 12 the script is simply blocked, which is equally harmless: `ci-guard` doesn't need it.
 
 > ⚠️ **Re-patch after every command that regenerates the workflow:** `init --github`, `github setup`, `protect` and `unprotect`. The steps below remind you. While patched, `doctor` reports `✖ GitHub guard … out of date`. That is expected before publishing.
 
@@ -550,7 +595,7 @@ git reset --hard origin/main
 
 ---
 
-## 6. Teammate clone "bob", and the global install
+## 6. Teammates: manual `init`, automatic setup on `npm install`, and the global template
 
 ### 6.1 `init` in a second clone
 
@@ -558,12 +603,14 @@ git reset --hard origin/main
 cd "$WORK"
 git clone https://github.com/<you>/express-vcs-test.git bob
 cd bob
+ls .git/hooks | grep -v sample
 vcs-protection init
 vcs-protection status
 ```
 
 **Expected:**
-- `init` prints `✔ Using rules from refs/remotes/origin/main:.vcs-protection.json` and `✔ Installed git hooks …`. There are **no** prompts, and no "Next: share the rules" block.
+- `ls` already shows the 6 hooks. They were copied from the global template (Phase 2.3), and they are **already active**: `origin/main` now has `.vcs-protection.json`.
+- `init` prints `✔ Using rules from refs/remotes/origin/main:.vcs-protection.json` and `✔ Installed git hooks …` (it refreshes them). There are **no** prompts, and no "Next: share the rules" block.
 - `status` shows `(remote)` and `Local bypasses logged: 0`.
 
 - [ ] passed
@@ -579,43 +626,183 @@ git reset -q && rm bob.txt
 
 - [ ] passed
 
-### 6.3 `install --global`: every future clone is protected automatically
+### 6.3 Automatic setup when the project depends on vcs-protection
+
+This is the recommended team setup: the package is a dev dependency, so `npm install` in any clone installs the hooks. Use a separate clone `dave`. The `package.json` changes made here are **not** committed.
+
+To test the real code path, and not the global template, clone with an empty template:
 
 ```bash
-vcs-protection install --global
-git config --global init.templateDir
-cd "$WORK" && git clone https://github.com/<you>/express-vcs-test.git carol
-ls carol/.git/hooks | grep -v sample
+cd "$WORK"
+git clone --template= https://github.com/<you>/express-vcs-test.git dave
+cd dave
+ls .git/hooks                           # No such file or directory
+npm install --foreground-scripts -D "$PKG/vcs-protection-1.0.0.tgz"
+```
+
+**Expected (npm ≤ 11):** among the npm output:
+
+```
+> vcs-protection@1.0.0 postinstall
+> node scripts/postinstall.mjs
+✔ vcs-protection: installed git hooks in …/dave/.git/hooks: reference-transaction, pre-commit, pre-merge-commit, pre-push, post-checkout, post-merge
+```
+
+There is no `No .vcs-protection.json yet` note, because `origin/main` has the rules.
+
+**npm ≥ 12:** the install ends with `npm warn install-scripts 1 package had install scripts blocked …` and no hooks are written. Approve the package (this adds an `allowScripts` entry to `package.json`, which a real team commits once) and reinstall:
+
+```bash
+npm install-scripts approve vcs-protection
+cat package.json | grep -A2 allowScripts
+npm install --foreground-scripts
+```
+
+**Expected:** `allowScripts` lists the tarball's `file:` spec (it would be `vcs-protection` for a registry install), and the `npm install` now prints the `✔ vcs-protection: installed git hooks …` line.
+
+Check where the hooks point, and that they work:
+
+```bash
+grep -E "VCSP_(NODE|CLI)=" .git/hooks/pre-commit
+npx vcs-protection status
+echo x > d.txt && git add d.txt && git commit -m "dave direct"; git reset -q; rm d.txt
 ```
 
 **Expected:**
-- `install --global` prints `✔ New clones will get vcs-protection hooks automatically (init.templateDir=C:\Users\<you>\.vcs-protection\git-template).`
-- `init.templateDir` points there.
-- `carol` has the 6 hooks **without** running `init`.
+- `VCSP_CLI` is `…/dave/node_modules/vcs-protection/dist/cli.js` (the project's copy, **not** the global one).
+- `npx vcs-protection status` (the local copy) shows 6 × `✔ … installed`.
+- The commit is blocked with `Direct commits to protected branch 'main' are not allowed.`
 
-Committing on `main` in `carol` is blocked:
+Also check that the global CLI sees these hooks as belonging to another installation:
 
 ```bash
-cd carol && echo x > c.txt && git add c.txt && git commit -m c; git reset -q; rm c.txt; cd ..
+vcs-protection status
+```
+
+**Expected:** 6 × `✖ … outdated`. This is normal: `status`/`doctor` compare the hooks with the CLI that runs them. In a project with the local dependency, use `npx vcs-protection …`. (Don't run the global `doctor --fix` here: it would repoint the hooks at the global CLI.)
+
+Now simulate a teammate's fresh checkout, where `package.json` already lists (and approves) the dependency:
+
+```bash
+rm .git/hooks/pre-commit .git/hooks/pre-push
+rm -rf node_modules
+npm ci
+ls .git/hooks | grep -v sample
+```
+
+**Expected:** `npm ci` prints nothing from vcs-protection (npm hides dependency script output) but the 6 hooks are back. `npx vcs-protection status` is all ✔.
+
+Upgrading the dependency refreshes the hooks: edit one hook by hand, then reinstall:
+
+```bash
+echo "# edited" >> .git/hooks/post-merge
+npx vcs-protection status | grep post-merge     # outdated
+npm ci
+npx vcs-protection status | grep post-merge     # installed
 ```
 
 - [ ] passed
 
-### 6.4 `install --global` twice, and the conflict with `--force`
+### 6.4 When the automatic setup does nothing
+
+Each case starts from a clone without hooks. Run in `dave`:
+
+```bash
+reset_hooks() { for h in reference-transaction pre-commit pre-merge-commit pre-push post-checkout post-merge; do rm -f ".git/hooks/$h"; done; }
+
+reset_hooks; VCS_PROTECTION_SKIP_INSTALL=1 npm ci --foreground-scripts; ls .git/hooks | grep -v sample
+reset_hooks; CI=true npm ci --foreground-scripts; ls .git/hooks | grep -v sample
+reset_hooks; npm ci --ignore-scripts; ls .git/hooks | grep -v sample
+```
+
+**PS:**
+
+```powershell
+function Reset-Hooks { "reference-transaction","pre-commit","pre-merge-commit","pre-push","post-checkout","post-merge" | ForEach-Object { Remove-Item -ErrorAction SilentlyContinue ".git\hooks\$_" } }
+Reset-Hooks; $env:VCS_PROTECTION_SKIP_INSTALL="1"; npm ci --foreground-scripts; Remove-Item Env:VCS_PROTECTION_SKIP_INSTALL; Get-ChildItem .git\hooks
+Reset-Hooks; $env:CI="true"; npm ci --foreground-scripts; Remove-Item Env:CI; Get-ChildItem .git\hooks
+Reset-Hooks; npm ci --ignore-scripts; Get-ChildItem .git\hooks
+```
+
+**Expected:** all three `npm ci` runs succeed, and **no** vcs-protection hooks are written (only `*.sample` files). With `--foreground-scripts`, the first two show `> node scripts/postinstall.mjs` and nothing after it.
+
+A failing setup must never break `npm install`. Make the hooks directory unwritable and install again:
+
+```bash
+reset_hooks; chmod a-w .git/hooks
+npm ci --foreground-scripts; echo "exit=$?"
+chmod u+w .git/hooks
+```
+
+**Expected:** `[vcs-protection] Automatic setup skipped: EACCES …` plus `Run \`vcs-protection init\` …`, and `exit=0`. (Skip this check on Windows, where `chmod` has no effect.)
+
+Outside a git repository, the setup is a no-op:
+
+```bash
+mkdir -p "$WORK/plain" && cd "$WORK/plain" && npm init -y >/dev/null
+npm install --foreground-scripts "$PKG/vcs-protection-1.0.0.tgz"     # npm ≥ 12: approve first, as in 6.3
+cd "$WORK" && rm -rf plain
+```
+
+**Expected:** `vcs-protection: …/plain is not inside a git working tree; no hooks installed.` and a successful install.
+
+Finally, removing the dependency does **not** remove the hooks (npm has had no uninstall scripts since v7):
+
+```bash
+cd "$WORK/dave"
+npm ci
+npm uninstall vcs-protection
+grep VCSP_CLI= .git/hooks/pre-commit
+echo x > d.txt && git add d.txt && git commit -m "after npm uninstall"; git reset -q; rm d.txt
+```
+
+**Expected:** the hooks still point at the deleted `node_modules/…/cli.js`. The shim falls back to the `vcs-protection` on your `PATH` (the global install), so the commit is **still blocked**. Without a global install it would print `CLI not found: branch protection is NOT active` and allow the commit (fail-open, see 7.5). The right way to remove it is `npx vcs-protection uninstall` **before** `npm uninstall`.
+
+Clean up `dave`:
+
+```bash
+vcs-protection uninstall
+git checkout -- package.json package-lock.json
+cd "$WORK" && rm -rf dave
+```
+
+- [ ] passed
+
+### 6.5 The global template covers every future clone
+
+Phase 2.3 already set `init.templateDir`. Check that a new clone is protected with no command at all:
+
+```bash
+git config --global init.templateDir
+cd "$WORK" && git clone https://github.com/<you>/express-vcs-test.git carol
+ls carol/.git/hooks | grep -v sample
+cd carol && echo x > c.txt && git add c.txt && git commit -m c; git reset -q; rm c.txt; cd ..
+```
+
+**Expected:**
+- `init.templateDir` is `…/.vcs-protection/git-template`.
+- `carol` has the 6 hooks **without** running `init`.
+- The commit on `main` is blocked.
+
+- [ ] passed
+
+### 6.6 `install --global`, the conflict with `--force`, and a reinstall with a foreign template
 
 ```bash
 vcs-protection install --global                         # idempotent
 git config --global init.templateDir "$WORK/other-template"
 vcs-protection install --global; echo "exit=$?"
+npm i -g --foreground-scripts "$PKG/vcs-protection-1.0.0.tgz"   # npm ≥ 12: add the --allow-scripts flag from 2.3
+git config --global init.templateDir
 vcs-protection install --global --force
+git config --global init.templateDir
 ```
 
 **Expected:**
-- The first command succeeds again.
+- The first command prints `✔ New clones will get vcs-protection hooks automatically (init.templateDir=…)` again.
 - The second is refused with `init.templateDir is already set to '…other-template'. Re-run with --force to replace it.` and `exit=1`.
-- `--force` succeeds.
-
-> If you had your own `init.templateDir` before this test, write down its value and restore it in Phase 14.
+- Reinstalling the package succeeds and prints `vcs-protection: git's init.templateDir is already set to '…other-template'; left it unchanged.` and the `install --global --force` hint. `init.templateDir` is still `…other-template`.
+- `--force` succeeds, and `init.templateDir` is back to `…/.vcs-protection/git-template`.
 
 - [ ] passed
 
@@ -701,12 +888,12 @@ echo z > z.txt && git add z.txt && git commit -m "while cli missing"
 Reinstall and clean up:
 
 ```bash
-npm i -g "$PKG/vcs-protection-1.0.0.tgz"
+npm i -g "$PKG/vcs-protection-1.0.0.tgz"     # npm ≥ 12: add the --allow-scripts flag from 2.3
 git reset --hard origin/main
 vcs-protection doctor
 ```
 
-**Expected:** `reset --hard origin/main` is allowed, and `doctor` shows all hooks ✔ again.
+**Expected:** `reset --hard origin/main` is allowed, and `doctor` shows all hooks ✔ again. The reinstall's postinstall finds `init.templateDir` already pointing at its template and just refreshes it.
 
 > `failMode: "closed"` blocks in this situation instead. Changing it is a rules change, so it only takes effect after the change is merged. Optionally test it with the Phase 9 flow.
 
@@ -1140,17 +1327,25 @@ Close the PR afterwards.
 ### 14.1 Clean up the test environment
 
 ```bash
-vcs-protection uninstall --global
-git config --global init.templateDir || echo "(unset)"
-# restore your own init.templateDir here if you had one (see 6.4)
-rm -rf ~/.vcs-protection
 cd "$WORK/alice" && vcs-protection uninstall
 cd "$WORK/bob" && vcs-protection uninstall
+cd "$WORK/carol" && vcs-protection uninstall
+vcs-protection uninstall --global
+git config --global init.templateDir || echo "(unset)"
+rm -rf ~/.vcs-protection
+npm uninstall -g vcs-protection
+# restore the init.templateDir saved in Phase 1, if the file is not empty:
+[ -s "$WORK/templateDir.bak" ] && git config --global init.templateDir "$(cat "$WORK/templateDir.bak")"
 ```
 
+**PS (last line):** `$t = Get-Content "$env:WORK\templateDir.bak"; if ($t) { git config --global init.templateDir $t }`
+
 **Expected:**
-- `uninstall --global` prints `✔ Removed the global git template.` and `init.templateDir` is `(unset)`.
 - Each repo `uninstall` prints `✔ Removed hooks: …`.
+- `uninstall --global` prints `✔ Removed the global git template.` and `init.templateDir` is `(unset)`.
+- `init.templateDir` ends up as it was before the test.
+
+Run the repo `uninstall`s **before** `npm uninstall -g`: hooks left behind by a removed CLI print `CLI not found` on every commit (6.4).
 
 On GitHub:
 - delete the `vcs-protection/rescue/*`, `feature/*` and `release/*` branches
@@ -1163,7 +1358,7 @@ Re-run the app baseline from 3.3 once (`npm start` + `curl`). **Expected:** iden
 
 ### 14.2 Record findings
 
-For each unchecked box, note the step, the actual output, and your OS/shell. Fix the issues in `PKG`, then re-run from Phase 2 (`npm test`, `npm pack`, `npm i -g`, copy the new tarball into `.vcs-protection-dev/` through an approved PR).
+For each unchecked box, note the step, the actual output, and your OS/shell. Fix the issues in `PKG`, then re-run from Phase 2 (`npm test`, `npm pack`, `npm i -g` (which re-runs the automatic setup), copy the new tarball into `.vcs-protection-dev/` through an approved PR).
 
 ### 14.3 Publish checklist
 
@@ -1172,7 +1367,8 @@ For each unchecked box, note the step, the actual output, and your OS/shell. Fix
 - [ ] Version bumped: `npm version <patch|minor|major>`. The workflow pins this version.
 - [ ] `npm publish --dry-run` looks right
 - [ ] `npm publish`
-- [ ] Fresh machine or shell: `npm i -g vcs-protection` → `vcs-protection --version`
+- [ ] Fresh machine or shell: `npm i -g vcs-protection` → `vcs-protection --version`, and `git config --global init.templateDir` points at `~/.vcs-protection/git-template` (npm ≥ 12: `npm i -g --allow-scripts=vcs-protection vcs-protection`)
+- [ ] In a real Node project: `npm i -D vcs-protection` (npm ≥ 12: plus `npm install-scripts approve vcs-protection`, and check that `allowScripts` now names `vcs-protection`), commit `package.json`, then in a fresh clone `npm ci` → `npx vcs-protection status` shows 6 × ✔
 - [ ] In a real repo: `vcs-protection github setup` (**no patch**), then merge it through a PR. One direct `--no-verify` push gets reverted by the published guard.
 - [ ] `vcs-protection doctor` shows all ✔ (the guard is no longer "out of date")
 
@@ -1186,5 +1382,9 @@ For each unchecked box, note the step, the actual output, and your OS/shell. Fix
 | Guard run fails with `403 Resource not accessible by integration` | Workflow permissions aren't set to "Read and write" (3.2). |
 | Guard fails at `npm i -g ./.vcs-protection-dev/...` | The tarball isn't committed on `main`, or the patch is missing. Run `node dev-patch-workflow.mjs .` |
 | Hooks don't fire at all | Run `vcs-protection doctor`. Check `git config core.hooksPath`, and that `.git/hooks/reference-transaction` exists. |
+| `npm install` didn't install any hooks | npm ≥ 12 without an `allowScripts` approval (look for `install scripts blocked`), `--ignore-scripts` (or `ignore-scripts=true` in an `.npmrc`), `CI` or `VCS_PROTECTION_SKIP_INSTALL` set, or not a git repo. Re-run with `--foreground-scripts` to see what the script says. |
+| `status` / `doctor` show every hook as `outdated` in a project with the local dependency | You ran the **global** CLI; the hooks belong to the project's copy. Use `npx vcs-protection status`. |
+| `CLI not found: branch protection is NOT active` after removing the package | The hooks outlived the CLI (`npm uninstall` runs no scripts). Reinstall, or remove the hooks with `vcs-protection uninstall` / by deleting the managed files in `.git/hooks`. |
+| `npm i -g` left `init.templateDir` unchanged | Another template was already configured. `vcs-protection install --global --force` replaces it. |
 | `protect` doesn't open a PR | No token found. Run `gh auth status`, or set `GITHUB_TOKEN`. |
 | Every commit feels slow | Each blocked or protected-branch operation starts Node (about 150–200 ms). Commits on feature branches pay this once, for pre-commit. |

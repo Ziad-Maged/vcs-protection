@@ -73,5 +73,7 @@ export async function init(opts: InitOptions): Promise<void> {
     info(`    ${BYPASS_ENV}="initial setup" git commit ...  and  ${BYPASS_ENV}="initial setup" git push`);
   }
   info('');
-  info(`Teammates: after cloning, run ${c.cyan('vcs-protection init')} once (or ${c.cyan('vcs-protection install --global')} to cover every clone).`);
+  info(`Teammates: add it as a dev dependency (${c.cyan('npm i -D vcs-protection')}) and every ${c.cyan('npm install')} sets up the hooks.`);
+  info(`  npm >= 12 blocks dependency install scripts: also run ${c.cyan('npm install-scripts approve vcs-protection')} and commit package.json.`);
+  info(`  Otherwise run ${c.cyan('vcs-protection init')} once per clone (or ${c.cyan('npm i -g vcs-protection')} to cover every future clone).`);
 }

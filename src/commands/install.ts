@@ -9,20 +9,29 @@ export function globalTemplateDir(): string {
   return path.join(os.homedir(), '.vcs-protection', 'git-template');
 }
 
+export type GlobalTemplateResult = { state: 'installed'; dir: string } | { state: 'conflict'; current: string };
+
 /**
  * Point git's init.templateDir at a template containing the shims, so every future
  * `git clone` / `git init` gets them. The shims do nothing in repositories without a config.
+ * Leaves a foreign init.templateDir alone unless `force` is set.
  */
-export function installGlobal(opts: { force?: boolean }): void {
+export function installGlobalTemplate(force = false): GlobalTemplateResult {
   const ours = globalTemplateDir();
   const current = gitMaybe(['config', '--global', 'init.templateDir']);
-  if (current && path.resolve(current) !== path.resolve(ours) && !opts.force) {
-    throw new Error(`init.templateDir is already set to '${current}'. Re-run with --force to replace it.`);
-  }
+  if (current && path.resolve(current) !== path.resolve(ours) && !force) return { state: 'conflict', current };
   mkdirSync(ours, { recursive: true });
   installHooksInDir(path.join(ours, 'hooks'), 'open');
   git(['config', '--global', 'init.templateDir', ours]);
-  info(`${c.green('✔')} New clones will get vcs-protection hooks automatically (init.templateDir=${ours}).`);
+  return { state: 'installed', dir: ours };
+}
+
+export function installGlobal(opts: { force?: boolean }): void {
+  const res = installGlobalTemplate(opts.force);
+  if (res.state === 'conflict') {
+    throw new Error(`init.templateDir is already set to '${res.current}'. Re-run with --force to replace it.`);
+  }
+  info(`${c.green('✔')} New clones will get vcs-protection hooks automatically (init.templateDir=${res.dir}).`);
   info(c.dim('  Existing clones still need `vcs-protection init` (or `git init` inside them to copy the template).'));
 }
 
