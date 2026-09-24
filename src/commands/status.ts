@@ -78,7 +78,7 @@ export function doctor(opts: { fix?: boolean }): number {
     checks.push({
       name: 'GitHub guard',
       ok: inSync,
-      detail: inSync ? `present (pinned to ${pinned})` : 'branch list out of date with the config (run `vcs-protection github setup`)',
+      detail: inSync ? `present (pinned to ${pinned})` : 'out of date with the config (run `vcs-protection github setup`)',
     });
   }
 

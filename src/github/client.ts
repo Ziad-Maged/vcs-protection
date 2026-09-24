@@ -137,6 +137,24 @@ export class GitHubClient {
     return this.request<{ html_url: string }>('POST', '/pulls', { title, head, base, body });
   }
 
+  /** Every check run on a commit. The endpoint wraps its list as `{ total_count, check_runs }`. */
+  async checkRunsForCommit(sha: string): Promise<CheckRun[]> {
+    const out: CheckRun[] = [];
+    for (let page = 1; page <= 20; page++) {
+      const res = await this.request<{ total_count: number; check_runs: CheckRun[] }>(
+        'GET',
+        `/commits/${sha}/check-runs?per_page=100&page=${page}`,
+      );
+      out.push(...res.check_runs);
+      if (res.check_runs.length < 100 || out.length >= res.total_count) break;
+    }
+    return out;
+  }
+
+  getCommit(sha: string) {
+    return this.request<{ sha: string; parents: { sha: string }[] }>('GET', `/commits/${sha}`);
+  }
+
   getRepo() {
     return this.request<{ default_branch: string }>('GET', '');
   }
@@ -151,6 +169,28 @@ export interface PullRequest {
   user: { login: string } | null;
   base: { ref: string; sha: string };
   head: { ref: string; sha: string };
+}
+
+export interface CheckRun {
+  id: number;
+  name: string;
+  status: 'queued' | 'in_progress' | 'completed' | string;
+  conclusion: string | null;
+  html_url: string;
+  check_suite?: { id: number } | null;
+}
+
+/** The `workflow_run` object of a workflow_run event. */
+export interface WorkflowRun {
+  id: number;
+  name: string;
+  /** Event that triggered the run (`push`, `pull_request`, ...). */
+  event: string;
+  head_branch: string | null;
+  head_sha: string;
+  conclusion: string | null;
+  check_suite_id: number;
+  html_url: string;
 }
 
 export interface Review {

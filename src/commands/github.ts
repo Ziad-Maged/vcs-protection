@@ -7,11 +7,12 @@ import { requireRepoRoot } from '../git/repo.js';
 import { ruleFor } from '../rules/match.js';
 import { VERSION } from '../version.js';
 import { c, info } from '../ui.js';
-import { githubClient, requireEffectiveConfig, writeWorkflow } from './shared.js';
+import { githubClient, requireEffectiveConfig, workingConfig, writeWorkflow } from './shared.js';
 
 export function githubSetup(opts: { pin?: string }): void {
   const root = requireRepoRoot();
-  const { config } = requireEffectiveConfig();
+  // The workflow is committed together with the config, so render the config being edited.
+  const config = workingConfig();
   const file = writeWorkflow(config, opts.pin ?? VERSION);
   info(`${c.green('✔')} Wrote ${path.relative(root, file)} (runs vcs-protection@${opts.pin ?? VERSION})`);
   info('');
@@ -19,6 +20,10 @@ export function githubSetup(opts: { pin?: string }): void {
   info('  • revert pushes to protected branches that did not come from an approved PR (saving them on a rescue branch)');
   info('  • open an issue describing each violation');
   info(`  • post a '${STATUS_CONTEXT}' status on pull requests into protected branches`);
+  const pill = config.github.poisonPill;
+  if (pill.enabled) {
+    info(`  • poison pill: revert a merged commit when a critical workflow (${pill.workflows.join(', ')}) fails on it`);
+  }
   info(c.dim(`Check Settings → Actions → General → Workflow permissions allows "Read and write permissions".`));
 }
 

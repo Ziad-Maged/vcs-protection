@@ -38,7 +38,7 @@ It does this on two layers:
 | Layer | Where it runs | What it does |
 |---|---|---|
 | **Local git hooks** | Every teammate's clone | Refuse commits, merges, cherry-picks, rebases, resets and pushes that would change a protected branch. This includes `git commit --no-verify`, through the `reference-transaction` hook. |
-| **GitHub Actions guard** | On GitHub, on every push to a protected branch and on PR events | Accept a push to a protected branch only if it is the merge commit of a PR with enough approvals. Otherwise save the commits to a rescue branch, reset or delete the branch, and open an issue. Also posts an approvals status on PRs. |
+| **GitHub Actions guard** | On GitHub, on every push to a protected branch, on PR events, and (optionally) when critical CI workflows finish | Accept a push to a protected branch only if it is the merge commit of a PR with enough approvals. Otherwise save the commits to a rescue branch, reset or delete the branch, and open an issue. Also posts an approvals status on PRs. With the optional **poison pill**, a merge that makes a critical CI workflow fail gets the same treatment. |
 
 The package is a single Node.js CLI (`vcs-protection`). The git hooks are small POSIX shell scripts ("shims") that call the CLI. The GitHub guard is a generated workflow that runs the same CLI with `npx`.
 
@@ -51,7 +51,7 @@ The package is a single Node.js CLI (`vcs-protection`). The git hooks are small 
 - **Effective rules:** the rules that currently apply. They are read from the remote's default branch, not from your working tree (see [section 6](#6-how-the-effective-rules-are-found)). Changing the rules therefore requires a reviewed PR as well.
 - **Bypass:** a logged, per-command escape hatch (`VCS_PROTECTION_BYPASS="<reason>"`) for emergencies and for the one-time bootstrap.
 
-**What it defends against:** honest mistakes and shortcuts: committing on `main` by accident, `--no-verify`, fast-forward merging locally and pushing, force-pushing, merging a PR in the GitHub UI without approval, deleting a protected branch.
+**What it defends against:** honest mistakes and shortcuts: committing on `main` by accident, `--no-verify`, fast-forward merging locally and pushing, force-pushing, merging a PR in the GitHub UI without approval, deleting a protected branch, and (with the poison pill) approved merges that break the critical test suites.
 
 **What it doesn't defend against:** a determined teammate with write access. Local hooks can be removed, and a direct push that also deletes the guard workflow isn't checked (see [Limitations](#17-limitations)). These are guardrails, not a security boundary. The `audit` command exists to detect what slipped through.
 
@@ -212,7 +212,13 @@ The file lives at the repository root and is committed. It is validated with a s
   "github": {
     "enforcement": "revert",
     "rescueBranchPrefix": "vcs-protection/rescue/",
-    "bypassUsers": []
+    "bypassUsers": [],
+    "poisonPill": {
+      "enabled": true,
+      "workflows": ["CI"],
+      "checks": [],
+      "conclusions": ["failure", "timed_out"]
+    }
   },
   "failMode": "open"
 }
@@ -232,7 +238,11 @@ The file lives at the repository root and is committed. It is validated with a s
 | `bypass.allowed` | boolean | `true` | Whether `VCS_PROTECTION_BYPASS` works in the local hooks. Has no effect on the GitHub guard. |
 | `github.enforcement` | `"revert"` \| `"report"` | `"revert"` | What the guard does on a violation. `revert`: save the commits to a rescue branch, reset/delete/restore the branch, open an issue. `report`: only open the issue. |
 | `github.rescueBranchPrefix` | string, non-empty | `"vcs-protection/rescue/"` | Prefix of rescue branches. The full name is `<prefix><branch>-<sha7>`. |
-| `github.bypassUsers` | string[] | `[]` | GitHub logins whose pushes and deletions the guard accepts without checks (for example release managers or bots). |
+| `github.bypassUsers` | string[] | `[]` | GitHub logins whose pushes and deletions the guard accepts without checks (for example release managers or bots). Doesn't apply to the poison pill. |
+| `github.poisonPill.enabled` | boolean | `false` | Turn on the post-merge check of [12.8](#128-poison-pill-post-merge-ci-breaches). |
+| `github.poisonPill.workflows` | string[] | `[]` | The `name:` of each critical workflow (exactly as in its YAML). **At least one is required when `enabled` is `true`** (`github.poisonPill.workflows: list at least one workflow name when the poison pill is enabled`). |
+| `github.poisonPill.checks` | string[] | `[]` | Check-run (job) names that count. Empty: every job of the finished critical workflow. |
+| `github.poisonPill.conclusions` | array of `failure`, `timed_out`, `cancelled`, `action_required`, `startup_failure`; at least one | `["failure", "timed_out"]` | Check-run conclusions that count as a breach. |
 | `failMode` | `"open"` \| `"closed"` | `"open"` | What hooks do when the CLI is missing or crashes. `open` warns and allows the operation; `closed` blocks it. |
 
 ### 5.3 Patterns
@@ -251,7 +261,7 @@ When several rules match a branch, the **first** one in the array wins. `protect
 
 ### 5.4 Changing the configuration
 
-Use `protect` / `unprotect` (they also regenerate the workflow's branch list and open a PR), or edit the file on a branch and open a PR yourself. A change takes effect for everyone only after it is merged into the default branch and fetched. After a hand edit, also run `vcs-protection github setup` so the workflow's `push.branches` filter matches the new patterns; `doctor` reports when they differ.
+Use `protect` / `unprotect` (they also regenerate the workflow's branch list and open a PR), or edit the file on a branch and open a PR yourself. A change takes effect for everyone only after it is merged into the default branch and fetched. After a hand edit, also run `vcs-protection github setup` so the workflow's `push.branches` filter (and, with the poison pill, its `workflow_run` trigger) matches the new settings; `doctor` reports when they differ.
 
 ---
 
@@ -505,7 +515,7 @@ Checks the installation and exits 1 if any check fails:
 | config shared | the rules only exist in the working tree, not on the remote default branch |
 | core.hooksPath | – (informational) |
 | hook `<name>` ×6 | not `installed` |
-| GitHub guard | the workflow is missing, or differs from what `github setup` would generate for the current rules and the pinned version |
+| GitHub guard | the workflow is missing, or differs from what `github setup` would generate for the effective rules and the pinned version (`out of date with the config`) |
 
 `--fix` reinstalls `missing` and `outdated` hooks (not `foreign` ones). Other failures stay.
 
@@ -515,7 +525,7 @@ Checks the installation and exits 1 if any check fails:
 vcs-protection github setup [--pin <version>]
 ```
 
-Writes `.github/workflows/vcs-protection-guard.yml` for the effective rules. The workflow runs `npx --yes vcs-protection@<version> ci-guard`; the version is `--pin`, or the running CLI's version. Commit the file through a PR. Re-run it after hand-editing the patterns (`protect`/`unprotect` do it for you).
+Writes `.github/workflows/vcs-protection-guard.yml` for the rules in the working-tree `.vcs-protection.json` (the version you are about to commit; the effective rules if there is no local file), including the `workflow_run` trigger when the poison pill is enabled. The workflow runs `npx --yes vcs-protection@<version> ci-guard`; the version is `--pin`, or the running CLI's version. Commit the file through a PR. Re-run it after hand-editing the patterns (`protect`/`unprotect` do it for you).
 
 ### `audit`
 
@@ -560,7 +570,7 @@ echo "refs/heads/feature $(git rev-parse feature) refs/heads/main $(git rev-pars
 
 ### `ci-guard` (internal, hidden)
 
-Run by the guard workflow. Needs `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY` and a token. See [section 12](#12-the-github-actions-guard).
+Run by the guard workflow. Needs `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY` and a token. Handles `push`, `delete`, `pull_request`, `pull_request_review` and `workflow_run` events; others are ignored. See [section 12](#12-the-github-actions-guard).
 
 ### `postinstall` (internal, hidden)
 
@@ -583,15 +593,22 @@ on:
     types: [opened, synchronize, reopened, edited]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  workflow_run:                          # only with the poison pill
+    workflows: ['CI']                    # poisonPill.workflows
+    types: [completed]
+    branches: ['main', 'release/*']
 
 permissions:
   contents: write        # create/update/delete refs
   issues: write          # open violation issues
   pull-requests: read    # PRs and reviews
   statuses: write        # the approvals status
+  checks: read           # only with the poison pill: check-run results
+  actions: read          # only with the poison pill: workflow runs
 
 concurrency:
   group: vcs-protection-${{ github.event_name }}-${{ github.event.ref || github.event.pull_request.number }}
+  # with the poison pill: ... || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -605,7 +622,7 @@ jobs:
         env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
 ```
 
-The job needs no checkout: it reads everything through the GitHub API. Runs for the same branch are serialised, never cancelled. The runner sets `CI=true`, so the package's automatic setup does nothing during `npx`. The repository setting **Workflow permissions: Read and write** is required.
+The job needs no checkout: it reads everything through the GitHub API. Runs for the same branch are serialised, never cancelled. With the poison pill off, the generated file is exactly the same as in versions without the feature. The runner sets `CI=true`, so the package's automatic setup does nothing during `npx`. The repository setting **Workflow permissions: Read and write** is required.
 
 ### 12.2 Push to a protected branch
 
@@ -638,6 +655,8 @@ For each reviewer, only their **latest decisive** review counts:
 
 ### 12.4 Remediation
 
+Remediation never creates revert commits. "Reverting" a violation means moving the branch back with the API (a forced ref update), guarded by a compare-and-swap check. It is shared by all violation kinds, including the poison pill.
+
 For a violation with `enforcement: "revert"`:
 
 | Violation | Action |
@@ -647,7 +666,7 @@ For a violation with `enforcement: "revert"`:
 
 With `enforcement: "report"`, nothing is changed (`Enforcement is "report": nothing was reverted.`).
 
-In both modes an issue is opened, titled `vcs-protection: <kind> on <branch> (<sha7>)`, with who pushed (`@login`), what happened, the rule, the before/after SHAs, the PR link (if any), the actions taken, a compare link to open a PR from the rescue branch, and the command that re-syncs local clones:
+In both modes an issue is opened, titled `vcs-protection: <kind> on <branch> (<sha7>)` (kinds: `direct-push`, `force-push`, `insufficient-approvals`, `created`, `deleted`, `poison-pill`), with who pushed (`@login`), what happened, the rule, the before/after SHAs, the PR link (if any), the actions taken, a compare link to open a PR from the rescue branch, and the command that re-syncs local clones:
 
 ```sh
 git fetch origin && git switch main && git reset --hard origin/main
@@ -672,6 +691,49 @@ The job itself stays green for PR events; the status carries the information. Th
 ### 12.7 GitHub Enterprise
 
 The host is taken from `GITHUB_SERVER_URL`; the API base is `https://<host>/api/v3` for hosts other than `github.com`.
+
+### 12.8 Poison pill: post-merge CI breaches
+
+The checks above judge *how* a commit reached a protected branch. The poison pill judges *what it did*: an approved, correctly merged PR that makes a critical CI workflow fail on the protected branch is treated as a breach and remediated like any other violation.
+
+**Enabling it:**
+
+```json
+"github": { "poisonPill": { "enabled": true, "workflows": ["CI", "E2E"], "checks": ["unit", "integration"] } }
+```
+
+Edit the config on a PR branch, run `vcs-protection github setup` there (it renders the working-tree config, so the workflow gets the `workflow_run` trigger right away), and merge both files in one reviewed PR. The pill only acts on commits merged **after** that PR, because every commit is judged by the rules at its parent.
+
+**Trigger:** the generated workflow listens to `workflow_run` (`types: [completed]`) for the listed workflows, filtered to the protected branches. The guard therefore wakes up exactly when a critical workflow finishes; it never polls or sleeps, and it can't check "too early" while the tests are still running. Notes:
+
+- The names in `workflows` must match the critical workflows' `name:` exactly.
+- GitHub triggers `workflow_run` only from the workflow file **on the default branch**. The trigger works only after the regenerated guard is merged there. It also means a pushed commit can't switch this check off by editing the guard.
+- Each finished critical workflow triggers one guard run. Several workflows mean several runs; they are serialised per branch.
+
+**Decision** (`evaluatePoisonPill`, pure, in `src/github/guard.ts`). In order, the run is ignored (ok) when:
+
+1. the poison pill is disabled in the rules as they were **before** the commit (read at the commit's first parent, so a breaking commit can't turn the pill off);
+2. the workflow run wasn't triggered by a `push` (failing PR builds are not breaches);
+3. its branch isn't protected, or the workflow isn't in `workflows`;
+4. the commit is no longer on the branch (a previous run already reset it). This makes re-runs and several failing workflows idempotent;
+5. none of the relevant check runs failed;
+6. **every failing check had already failed on the commit's first parent.** Then the breakage was inherited, not caused by this commit. This happens when an innocent PR is merged on top of a broken one while CI is still running. Without this rule the guard would reset the innocent (newest) commit and keep the broken one.
+
+The results come from GitHub's check-runs API (`GET /commits/{sha}/check-runs`), not from the event payload alone. Relevant check runs are those of the finished workflow run's own check suite (`check_suite.id` equals the run's `check_suite_id`), narrowed to `checks` when it isn't empty, that are `completed` with a conclusion in `conclusions`. Anything else (a success, a `cancelled` run with the default conclusions, a job of another workflow) is ignored.
+
+`github.bypassUsers` does **not** apply: the breach is about test results, not about who merged.
+
+**Remediation:** the offending commit is handed to the regular remediation of 12.4 as if it had been pushed, with `before` = its first parent:
+
+| Situation | Result |
+|---|---|
+| The broken commit is still the branch tip | The commit is saved on the rescue branch, and the branch is **reset to its parent**. The issue says to fix the failing checks on a branch made from the rescue branch and open a new PR. |
+| Newer commits landed on top (other merges while CI ran) | The newer commits' own CI runs fail too, but rule 6 recognises the failure as inherited and leaves them alone. For the broken commit, compare-and-swap refuses the reset, so innocent later merges are never discarded. The rescue branch is saved, and the issue gives the exact undo through a PR: `git switch -c vcs-protection/revert-<sha7> origin/<branch>`, then `git revert -m 1 <sha>` (merge commit) or `git revert <sha>` (squash/rebase merge), push, and a compare link. |
+| `enforcement: "report"` | Nothing is changed; the issue contains the same revert instructions. |
+
+The issue (`vcs-protection: poison-pill on <branch> (<sha7>)`) opens with "…broke a critical CI workflow (poison pill)". It lists each failing check with its conclusion and link, the workflow run link, and the merged PR if there is one. The job summary shows `❌ Critical checks failed on '<branch>' after <sha7> was merged: <checks>.` and the job fails. A passing run ends with `✅ <branch>: critical checks of '<workflow>' passed on <sha7>`.
+
+Resets made by the guard use `GITHUB_TOKEN`, and GitHub doesn't start workflows for them. CI therefore doesn't re-run on the restored tip; it was already green there.
 
 ---
 
@@ -731,6 +793,7 @@ The repository comes from the configured remote's URL. Supported forms: `https:/
 | `audit` | no problems and no logged bypasses | problems found, or bypasses logged |
 | `ci-guard` (push) | ok, or no rules | violation (after remediation) |
 | `ci-guard` (delete) | nothing to report / already restored | issue opened |
+| `ci-guard` (workflow_run) | ignored, or critical checks passed | poison pill detonated (after remediation) |
 | `ci-guard` (PR) | always (the status carries the result) | – |
 | `postinstall`, `scripts/postinstall.mjs` | always | – |
 
@@ -742,6 +805,7 @@ The repository comes from the configured remote's URL. Supported forms: `https:/
 - **The workflow runs from the pushed commit.** GitHub runs workflow files from the commit being pushed, so a direct push that also deletes or edits `vcs-protection-guard.yml` isn't checked. `vcs-protection audit` finds such commits afterwards.
 - **Merges are reverted, not prevented.** A PR merged without enough approvals shows as "merged" on GitHub and is then reverted. The issue and the rescue branch explain how to redo it properly.
 - **Blocked fast-forward merges and `reset --hard` leave files updated.** Git updates the working tree before the ref. The block message prints the `git read-tree -m -u <sha> HEAD` command that restores them.
+- **The poison pill reacts after the fact, and only to the latest commit.** It can reset only while the broken commit is still the tip; otherwise it opens an issue with the `git revert` command. A flaky critical test causes a real reset, so keep `workflows`/`checks` to reliable suites.
 - **PR association lag.** GitHub may take a few seconds to associate a merge commit with its PR; a legitimate merge could then be judged `direct-push`. Re-running the job fixes it.
 - **Uninstalling the package leaves hooks behind.** npm runs no uninstall scripts; see [4.6](#46-removing-the-hooks).
 - **npm ≥ 12 needs approval** for the automatic setup ([4.3](#43-npm-12-and-install-script-approval)); other package managers may not run dependency scripts at all (for example pnpm ≥ 10 without `onlyBuiltDependencies`), in which case use `vcs-protection init`.
@@ -763,6 +827,8 @@ The repository comes from the configured remote's URL. Supported forms: `https:/
 | A legitimate PR merge was reverted as `direct-push` | GitHub's commit-to-PR association lagged. Re-run the job; report it if it keeps happening. |
 | Guard fails with `403 Resource not accessible by integration` | Workflow permissions aren't "Read and write". |
 | `protect` doesn't open a PR | No token: `gh auth login` or set `GITHUB_TOKEN`. The printed compare link still works. |
+| Poison pill never fires | The guard with the `workflow_run` trigger isn't merged on the default branch yet; `workflows` doesn't match the critical workflow's `name:` exactly; the failing run came from a PR, not a push; or the failing conclusion isn't in `conclusions` (e.g. `cancelled`). The guard run's log explains its decision (`Poison pill: ignoring … : <reason>`, or `✅ … critical checks … passed`). |
+| Poison pill opened an issue but didn't reset | Newer commits landed on top of the broken one. Use the `git revert` command from the issue, through a PR. |
 | `doctor`: `GitHub guard … out of date` | The workflow's branch list doesn't match the rules (hand edit), or it was modified. Run `vcs-protection github setup`. |
 
 ---
@@ -793,7 +859,7 @@ src/
 ├── github/
 │   ├── remote.ts           parse remote URLs, compare/API URLs
 │   ├── client.ts           minimal REST client, token resolution (section 13)
-│   ├── guard.ts            judgePush, remediatePush, deletes, PR status, review counting (section 12)
+│   ├── guard.ts            judgePush, remediatePush, deletes, PR status, review counting, poison pill (section 12)
 │   └── workflow.ts         workflow template
 └── commands/
     ├── init.ts             init
@@ -811,7 +877,7 @@ scripts/postinstall.mjs     npm lifecycle wrapper: guards, then runs `dist/cli.j
 
 **Design notes:**
 
-- The rule engine and the guard's verdict logic take their repository/API access as parameters, so they are unit-tested without git or network.
+- The rule engine and the guard's verdict logic take their repository/API access as parameters, so they are unit-tested without git or network. The poison pill follows the same split: `evaluatePoisonPill(run, config, facts)` is pure, and `judgeWorkflowRun` only gathers the facts (check runs of the commit and of its parent, branch tip, compare, parent commit) and builds the push for `remediatePush`.
 - The CLI is bundled into **one file** (`dist/cli.js`, tsup with `splitting: false` and all dependencies inlined). Shims embed this file's path, so code must never move into separate chunks, and `npx` in CI installs nothing extra.
 - Commands are loaded with dynamic `import()`, so hooks only pay for the code they use.
 - The postinstall wrapper is plain JavaScript without dependencies. It runs before anything is guaranteed to be built (in vcs-protection's own checkout) and must not fail. It spawns the real CLI rather than importing it, so `cliPath()` resolves to `dist/cli.js`, which is the path the shims must embed.
@@ -837,8 +903,8 @@ After a build, `npm install` in this repository still doesn't install hooks here
 | Suite | What it covers |
 |---|---|
 | `test/unit/evaluate.test.ts` | Pattern matching, and the rule engine's allow/block/bypass paths for ref updates and pushes. |
-| `test/unit/guard.test.ts` | Review counting, push verdicts (direct push, force push, approvals, deletion, bypass users), remediation (rescue branch, compare-and-swap, report mode) and the PR status, with a fake GitHub client. |
-| `test/unit/misc.test.ts` | Remote URL parsing, config parsing and defaults, reference-transaction input parsing, and rendering of the shim, the workflow and block messages. |
+| `test/unit/guard.test.ts` | Review counting, push verdicts (direct push, force push, approvals, deletion, bypass users), remediation (rescue branch, compare-and-swap, report mode), the PR status, and the poison pill: the pure decision (every ignore case, conclusions, check-suite and `checks` filtering, inherited failures), fact gathering (check-runs paging shape, parent as `before`, `git revert` form), remediation and issue text for tip/moved-tip, and `ci-guard`'s `workflow_run` wiring (rules at the parent, exit codes) with a stubbed `fetch`. All use a fake GitHub client. |
+| `test/unit/misc.test.ts` | Remote URL parsing, config parsing and defaults (including poison-pill validation), reference-transaction input parsing, and rendering of the shim, the workflow (with and without the `workflow_run` trigger) and block messages. |
 | `test/integration/hooks.test.ts` | Real git repositories in a temp dir (bare origin + two clones): commits, `--no-verify`, merges, resets, pushes, bypass, chaining, self-repair. |
 | `test/integration/postinstall.test.ts` | The automatic setup: package laid out under `node_modules` of a temp repository; hooks installed and pointing there, `failMode` from the config, chaining, subdirectories, the skip conditions, non-git directories, the package's own repository, missing `dist/`, and global mode (`init.templateDir` set, idempotent, foreign template left alone). |
 

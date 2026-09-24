@@ -33,6 +33,7 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | `uninstall`, `uninstall --global` | 7, 14 |
 | `hook <name>` (internal, called manually) | 7 |
 | `ci-guard` (internal; in Actions, and manually) | 4, 8, 10, 13 |
+| Poison pill: `github.poisonPill`, `workflow_run` trigger, reset, moved tip (`git revert`), inherited failures, idempotent re-runs | 10 |
 | `postinstall` (internal; run by npm) | 2, 6 |
 | `VCS_PROTECTION_BYPASS` + audit log | 4, 5 |
 | Git hooks: reference-transaction, pre-commit, pre-merge-commit, pre-push, post-checkout, post-merge | 5, 7 |
@@ -103,7 +104,7 @@ npm test
 
 ```
 Test Files  5 passed (5)
-     Tests  60 passed (60)
+     Tests  78 passed (78)
 ```
 
 - [ ] passed
@@ -360,7 +361,7 @@ vcs-protection doctor; echo "exit=$?"
 - `list --json` returns JSON with `"source": "local"`.
 - `doctor` shows ✔ for git version, config, core.hooksPath and all 6 hooks, plus these two failures, and `exit=1`:
   - `✖ config shared   .vcs-protection.json is not on the remote default branch yet; …`
-  - `✖ GitHub guard    branch list out of date …` (because of the patch; expected)
+  - `✖ GitHub guard    out of date with the config …` (because of the patch; expected)
 
 - [ ] passed
 
@@ -1172,6 +1173,131 @@ Using the Phase 9 flow, edit the config on a PR branch:
 
 - [ ] passed / skipped
 
+### 10.7 Poison pill: add a critical CI workflow and enable it
+
+The poison pill resets `main` when a critical CI workflow fails on a merged commit. The test repo gets a tiny `CI` workflow that fails whenever a file named `BREAK_TESTS` exists. It also sleeps 90 s, to simulate a slow suite (needed for 10.9).
+
+First rebuild the tarball, so the guard on GitHub knows the `workflow_run` event (an older build would log `Ignoring event 'workflow_run'`):
+
+```bash
+cd "$PKG" && npm pack
+cd "$WORK/alice" && git switch main && git fetch && git reset --hard origin/main
+git switch -c chore/poison-pill
+cp "$PKG/vcs-protection-1.0.0.tgz" .vcs-protection-dev/vcs-protection.tgz
+mkdir -p .github/workflows
+cat > .github/workflows/ci.yml <<'YML'
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulate a slow test suite
+        run: sleep 90
+      - name: Tests
+        run: test ! -f BREAK_TESTS || { echo "BREAK_TESTS is present"; exit 1; }
+YML
+node -e 'const fs=require("fs"),f=".vcs-protection.json",c=JSON.parse(fs.readFileSync(f));c.github.poisonPill={enabled:true,workflows:["CI"]};fs.writeFileSync(f,JSON.stringify(c,null,2)+"\n")'
+vcs-protection github setup
+node "$WORK/dev-patch-workflow.mjs" .
+grep -A5 "workflow_run" .github/workflows/vcs-protection-guard.yml
+git add -A .github .vcs-protection.json .vcs-protection-dev
+git commit -m "ci: add CI and enable the poison pill" && git push -u origin chore/poison-pill
+gh pr create --base main --head chore/poison-pill --title "Enable poison pill" --body "e2e"
+```
+
+**Expected:**
+- `github setup` prints the extra bullet `• poison pill: revert a merged commit when a critical workflow (CI) fails on it`. It renders from the working-tree config, so the trigger is there before the rules are merged.
+- The workflow contains `workflow_run:` with `workflows: ['CI']`, `types: [completed]` and the protected branches, and the permissions include `checks: read` and `actions: read`. The patch still applies (the guard step is unchanged).
+- The PR runs `CI` (green) and shows the `vcs-protection/approvals` status.
+
+As `<reviewer>`, approve; then merge.
+
+**Expected:**
+- The push guard run is green (approved merge).
+- `CI` runs on `main` (green after ~90 s). Its completion starts **another** guard run (event `workflow_run`), which is green: `Poison pill: ignoring 'CI' on main: poison pill is disabled.` This is correct: the merge is judged by the rules **before** it, where the pill was still off.
+- Locally: `git switch main && git pull && vcs-protection list --json` shows `"poisonPill": { "enabled": true, "workflows": ["CI"], … }`.
+
+- [ ] passed
+
+### 10.8 Poison pill: an approved merge breaks CI and is reset
+
+```bash
+git switch -c feature/break && touch BREAK_TESTS && git add BREAK_TESTS && git commit -m "break the tests"
+git push -u origin feature/break
+gh pr create --base main --head feature/break --title "Break the tests" --body "e2e"
+```
+
+The PR's own `CI` run fails. That is ignored by the guard (PR builds are not breaches). As `<reviewer>`, approve anyway; then merge. **Don't merge anything else for 3 minutes.**
+
+**Expected:**
+- The push guard run is green (the PR was approved).
+- `CI` on `main` fails after ~90 s.
+- A guard run with event `workflow_run` is **red**:
+  ```
+  ❌ Critical checks failed on 'main' after <sha7> was merged: test.
+    - `test`: failure (https://github.com/<you>/express-vcs-test/runs/…)
+    - Workflow run 'CI': https://github.com/<you>/express-vcs-test/actions/runs/…
+  - Saved the pushed commits on branch 'vcs-protection/rescue/main-<sha7>'.
+  - Reset 'main' back to <parent7>.
+  - Opened issue https://github.com/<you>/express-vcs-test/issues/<k>
+  ```
+- `main` on GitHub no longer has `BREAK_TESTS`, and the rescue branch has it.
+- The issue is titled `vcs-protection: poison-pill on main (<sha7>)`, starts with "…broke a critical CI workflow (poison pill)", lists the failing check, the run and the PR, and tells you to fix the checks from the rescue branch.
+- No new `CI` run starts on the reset `main` (changes made with `GITHUB_TOKEN` don't trigger workflows).
+
+Resync: `git fetch && git switch main && git reset --hard origin/main`.
+
+Now check idempotency: on GitHub, open the failed `CI` run on `main` and click **Re-run all jobs**.
+
+**Expected:** it fails again. The guard run it triggers is **green**: `✅ main: <sha7> is no longer on 'main' (already remediated)`. No second reset, no second issue.
+
+- [ ] passed
+
+### 10.9 Poison pill: a newer merge landed first, so no reset and no blaming the innocent
+
+Prepare two PRs and get both approved **before** merging either:
+
+```bash
+git switch main && git switch -c feature/break2 && touch BREAK_TESTS && git add BREAK_TESTS && git commit -m "break again" && git push -u origin feature/break2
+git switch main && git switch -c feature/innocent && echo ok > innocent.txt && git add innocent.txt && git commit -m "innocent change" && git push -u origin feature/innocent
+gh pr create --base main --head feature/break2 --title "Break again" --body "e2e"
+gh pr create --base main --head feature/innocent --title "Innocent" --body "e2e"
+```
+
+As `<reviewer>`, approve both. Then merge `Break again`, and **within 90 s** merge `Innocent` (it merges cleanly on top).
+
+**Expected:**
+- For the `break2` merge commit, a **red** guard run: the rescue branch is saved, then `Did NOT move 'main': it changed again after this push (now <sha7>). Fix it manually.`, and an issue. The issue has an **"Undo it through a pull request"** section:
+  ```sh
+  git fetch origin && git switch -c vcs-protection/revert-<sha7> origin/main
+  git revert -m 1 <sha>
+  git push -u origin vcs-protection/revert-<sha7>
+  ```
+  and a compare link.
+- For the `innocent` merge commit, `CI` fails too (`BREAK_TESTS` is still there), but its guard run is **green**: `✅ main: test already failed on <sha7>; not caused by <sha7>`. `main` still contains both merges.
+
+Follow the issue's instructions to revert, then get the revert PR approved and merged.
+
+**Expected:** `CI` on `main` is green again, and its guard run is green (`critical checks of 'CI' passed`). `innocent.txt` stays on `main`.
+
+- [ ] passed
+
+### 10.10 Poison pill: runs it must ignore
+
+Check the guard runs from the previous steps (Actions → vcs-protection guard, filter by event `workflow_run`):
+
+- **PR builds:** the failing `CI` runs of the `Break the tests` / `Break again` PRs didn't start any guard run: the trigger only fires for `main`/`release/*`, and a run from a PR would be ignored with `run was triggered by 'pull_request', not by a push`.
+- **Unlisted workflows:** workflows other than `CI` never wake the guard.
+
+Optionally, set `"conclusions": ["failure", "timed_out", "cancelled"]` through a rules PR, merge something, and cancel its `CI` run on `main`. **Expected:** the commit is reset, like in 10.8. With the default conclusions, a cancelled run is ignored.
+
+- [ ] passed / skipped
+
 ---
 
 ## 11. Changing rules: `unprotect`
@@ -1386,5 +1512,7 @@ For each unchecked box, note the step, the actual output, and your OS/shell. Fix
 | `status` / `doctor` show every hook as `outdated` in a project with the local dependency | You ran the **global** CLI; the hooks belong to the project's copy. Use `npx vcs-protection status`. |
 | `CLI not found: branch protection is NOT active` after removing the package | The hooks outlived the CLI (`npm uninstall` runs no scripts). Reinstall, or remove the hooks with `vcs-protection uninstall` / by deleting the managed files in `.git/hooks`. |
 | `npm i -g` left `init.templateDir` unchanged | Another template was already configured. `vcs-protection install --global --force` replaces it. |
+| Poison pill: no guard run after `CI` finishes | The guard with the `workflow_run` trigger isn't on `main` yet (GitHub only uses the default branch's copy), or the name in `workflows` doesn't match `name: CI`. |
+| Poison pill guard run logs `Ignoring event 'workflow_run'` | `.vcs-protection-dev/vcs-protection.tgz` on `main` is an old build. Redo the first commands of 10.7. |
 | `protect` doesn't open a PR | No token found. Run `gh auth status`, or set `GITHUB_TOKEN`. |
 | Every commit feels slow | Each blocked or protected-branch operation starts Node (about 150–200 ms). Commits on feature branches pay this once, for pre-commit. |

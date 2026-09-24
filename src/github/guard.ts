@@ -1,6 +1,6 @@
 import type { BranchRule, Config } from '../config/schema.js';
 import { ruleFor } from '../rules/match.js';
-import { GitHubError, type GitHubClient, type PullRequest, type Review } from './client.js';
+import { GitHubError, type CheckRun, type GitHubClient, type PullRequest, type Review, type WorkflowRun } from './client.js';
 import { compareUrl, webUrl } from './remote.js';
 
 export const STATUS_CONTEXT = 'vcs-protection/approvals';
@@ -64,11 +64,22 @@ export interface PushEvent {
   repository?: { default_branch?: string };
 }
 
-export type ViolationKind = 'direct-push' | 'force-push' | 'insufficient-approvals' | 'deleted' | 'created';
+export type ViolationKind = 'direct-push' | 'force-push' | 'insufficient-approvals' | 'deleted' | 'created' | 'poison-pill';
 
 export type Verdict =
   | { ok: true; reason: string; pr?: PullRequest }
-  | { ok: false; kind: ViolationKind; reason: string; branch: string; rule: BranchRule; pr?: PullRequest };
+  | {
+      ok: false;
+      kind: ViolationKind;
+      reason: string;
+      branch: string;
+      rule: BranchRule;
+      pr?: PullRequest;
+      /** Extra lines for the issue (e.g. the failing checks). */
+      details?: string[];
+      /** How to undo the commit by hand when the branch could not be reset (poison pill). */
+      revertCommand?: string;
+    };
 
 export async function judgePush(event: PushEvent, config: Config, client: GitHubClient): Promise<Verdict> {
   if (!event.ref.startsWith('refs/heads/')) return { ok: true, reason: 'not a branch' };
@@ -154,6 +165,7 @@ export async function remediatePush(
   const actions: string[] = [];
   const revert = config.github.enforcement === 'revert';
   let rescue: string | null = null;
+  let reset = false;
 
   if (revert) {
     if (verdict.kind === 'deleted') {
@@ -172,9 +184,11 @@ export async function remediatePush(
       } else if (verdict.kind === 'created' || isZero(event.before)) {
         await client.deleteRef(branch);
         actions.push(`Deleted '${branch}', which was created from unreviewed commits.`);
+        reset = true;
       } else {
         await client.updateRef(branch, event.before, true);
         actions.push(`Reset '${branch}' back to ${short(event.before)}.`);
+        reset = true;
       }
     }
   } else {
@@ -183,12 +197,18 @@ export async function remediatePush(
 
   const repo = client.repo;
   const who = event.sender?.login ? `@${event.sender.login}` : 'unknown user';
+  const poison = verdict.kind === 'poison-pill';
   const lines = [
-    `**vcs-protection** detected a change to protected branch \`${branch}\` that did not come through an approved pull request.`,
+    poison
+      ? `**vcs-protection** detected that a change merged into protected branch \`${branch}\` broke a critical CI workflow (poison pill).`
+      : `**vcs-protection** detected a change to protected branch \`${branch}\` that did not come through an approved pull request.`,
     '',
     `- **Who:** ${who}`,
     `- **What:** ${verdict.reason}`,
-    `- **Rule:** \`${verdict.rule.pattern}\` requires ${verdict.rule.requiredApprovals} approval(s) from someone other than the PR author`,
+    ...(verdict.details ?? []).map((d) => `  - ${d}`),
+    poison
+      ? `- **Rule:** \`${verdict.rule.pattern}\` must keep the critical workflows (${config.github.poisonPill.workflows.join(', ')}) passing`
+      : `- **Rule:** \`${verdict.rule.pattern}\` requires ${verdict.rule.requiredApprovals} approval(s) from someone other than the PR author`,
     `- **Before:** \`${event.before}\``,
     `- **After:** \`${event.after}\``,
     ...(verdict.pr ? [`- **Pull request:** ${verdict.pr.html_url}`] : []),
@@ -196,11 +216,27 @@ export async function remediatePush(
     '### Actions taken',
     ...actions.map((a) => `- ${a}`),
   ];
-  if (rescue) {
+  if (poison && !reset && verdict.revertCommand) {
+    const fix = `vcs-protection/revert-${short(event.after)}`;
+    lines.push(
+      '',
+      `### Undo it through a pull request`,
+      `\`${branch}\` was not reset${revert ? ' because newer commits landed on top of it' : ''}. Revert the commit on a branch and get the revert approved:`,
+      '```sh',
+      `git fetch origin && git switch -c ${fix} origin/${branch}`,
+      verdict.revertCommand,
+      `git push -u origin ${fix}`,
+      '```',
+      `Then open the pull request: ${compareUrl(repo, branch, fix)}`,
+    );
+  }
+  if (rescue && (!poison || reset)) {
     lines.push(
       '',
       '### How to get these changes in properly',
-      `Open a pull request from the rescue branch and get it approved: ${compareUrl(repo, branch, rescue)}`,
+      poison
+        ? `Fix the failing checks on a branch made from the rescue branch, then open a pull request and get it approved: ${compareUrl(repo, branch, rescue)}`
+        : `Open a pull request from the rescue branch and get it approved: ${compareUrl(repo, branch, rescue)}`,
       '',
       'Then, in local clones that already pulled the reverted commits:',
       '```sh',
@@ -267,4 +303,138 @@ export async function handlePrEvent(event: PrEvent, config: Config, client: GitH
 
 export function repoLink(client: GitHubClient): string {
   return webUrl(client.repo);
+}
+
+export interface WorkflowRunEvent {
+  workflow_run: WorkflowRun;
+  sender?: { login: string };
+}
+
+/** What the poison-pill decision needs to know about the repository (fetched by the caller). */
+export interface PoisonPillFacts {
+  /** Check runs on the run's head commit (GET /commits/{sha}/check-runs). */
+  checkRuns: CheckRun[];
+  /** Whether the head commit is still reachable from the branch tip (false once it was reset away). */
+  stillOnBranch: boolean;
+  /**
+   * Check runs on the commit's first parent. A check that already failed there was inherited, not
+   * caused by this commit (e.g. an innocent PR merged on top of a broken one while CI was running).
+   */
+  parentCheckRuns: CheckRun[];
+  /** First parent of the head commit (for messages). */
+  parentSha?: string;
+}
+
+type Precheck = { ok: true; verdict: Verdict } | { ok: false; branch: string; rule: BranchRule };
+
+/** Config-only part of the poison-pill decision: is this completed run one we should judge at all? */
+export function poisonPillPrecheck(run: WorkflowRun, config: Config): Precheck {
+  const pill = config.github.poisonPill;
+  const skip = (reason: string): Precheck => ({ ok: true, verdict: { ok: true, reason } });
+  if (!pill.enabled) return skip('poison pill is disabled');
+  if (run.event !== 'push') return skip(`run was triggered by '${run.event}', not by a push`);
+  const branch = run.head_branch;
+  const rule = branch ? ruleFor(config, branch) : null;
+  if (!branch || !rule) return skip(`'${branch ?? '(no branch)'}' is not protected`);
+  if (!pill.workflows.includes(run.name)) return skip(`'${run.name}' is not a critical workflow`);
+  return { ok: false, branch, rule };
+}
+
+/**
+ * Poison pill: decide whether a completed critical workflow broke a protected branch.
+ *
+ * Pure: all repository state comes in through `facts`. Only the completed check runs of this
+ * workflow run's check suite are considered (optionally narrowed to `poisonPill.checks`), so each
+ * critical workflow is judged by its own jobs when it finishes.
+ */
+export function evaluatePoisonPill(run: WorkflowRun, config: Config, facts: PoisonPillFacts): Verdict {
+  const pre = poisonPillPrecheck(run, config);
+  if (pre.ok) return pre.verdict;
+  const { branch, rule } = pre;
+  const pill = config.github.poisonPill;
+  if (!facts.stillOnBranch) return { ok: true, reason: `${short(run.head_sha)} is no longer on '${branch}' (already remediated)` };
+
+  const breach = new Set<string>(pill.conclusions);
+  const failing = facts.checkRuns.filter(
+    (c) =>
+      c.check_suite?.id === run.check_suite_id &&
+      (pill.checks.length === 0 || pill.checks.includes(c.name)) &&
+      c.status === 'completed' &&
+      c.conclusion !== null &&
+      breach.has(c.conclusion),
+  );
+  if (failing.length === 0) return { ok: true, reason: `critical checks of '${run.name}' passed on ${short(run.head_sha)}` };
+
+  const failedBefore = new Set(
+    facts.parentCheckRuns
+      .filter((c) => c.status === 'completed' && c.conclusion !== null && breach.has(c.conclusion))
+      .map((c) => c.name),
+  );
+  const inherited = failing.filter((c) => failedBefore.has(c.name));
+  if (inherited.length === failing.length) {
+    const parent = facts.parentSha ? short(facts.parentSha) : 'its parent';
+    return {
+      ok: true,
+      reason: `${inherited.map((c) => c.name).join(', ')} already failed on ${parent}; not caused by ${short(run.head_sha)}`,
+    };
+  }
+
+  return {
+    ok: false,
+    kind: 'poison-pill',
+    reason: `Critical checks failed on '${branch}' after ${short(run.head_sha)} was merged: ${failing.map((c) => c.name).join(', ')}.`,
+    branch,
+    rule,
+    details: [
+      ...failing.map((c) => `\`${c.name}\`: ${c.conclusion} (${c.html_url})`),
+      `Workflow run '${run.name}': ${run.html_url}`,
+    ],
+  };
+}
+
+/**
+ * Gather the facts for `evaluatePoisonPill` from the API and, on a breach, describe the offending
+ * commit as a push (before = its first parent) so `remediatePush` can handle it.
+ */
+export async function judgeWorkflowRun(
+  event: WorkflowRunEvent,
+  config: Config,
+  client: GitHubClient,
+): Promise<{ verdict: Verdict; push?: PushEvent }> {
+  const run = event.workflow_run;
+  const pre = poisonPillPrecheck(run, config);
+  if (pre.ok) return { verdict: pre.verdict };
+
+  const sha = run.head_sha;
+  const tip = await client.getRefSha(pre.branch);
+  let stillOnBranch = false;
+  if (tip === sha) stillOnBranch = true;
+  else if (tip) {
+    const cmp = await client.compare(sha, tip);
+    stillOnBranch = cmp.status === 'ahead' || cmp.status === 'identical';
+  }
+  const commit = await client.getCommit(sha);
+  const parent = commit.parents[0]?.sha;
+  if (!parent) return { verdict: { ok: true, reason: `${short(sha)} has no parent to go back to` } };
+  const verdict = evaluatePoisonPill(run, config, {
+    checkRuns: await client.checkRunsForCommit(sha),
+    stillOnBranch,
+    parentCheckRuns: await client.checkRunsForCommit(parent),
+    parentSha: parent,
+  });
+  if (verdict.ok) return { verdict };
+  verdict.revertCommand = commit.parents.length > 1 ? `git revert -m 1 ${sha}` : `git revert ${sha}`;
+  const prs = await client.pullsForCommit(sha);
+  verdict.pr = prs.find((p) => p.merged_at && p.base.ref === pre.branch);
+
+  const push: PushEvent = {
+    ref: `refs/heads/${pre.branch}`,
+    before: parent,
+    after: sha,
+    created: false,
+    deleted: false,
+    forced: false,
+    sender: event.sender,
+  };
+  return { verdict, push };
 }

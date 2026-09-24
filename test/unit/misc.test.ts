@@ -37,7 +37,16 @@ describe('config', () => {
     expect(c.protected[0]).toEqual({ pattern: 'main', requiredApprovals: 1, allowDeletion: false });
     expect(c.bypass.allowed).toBe(true);
     expect(c.github.enforcement).toBe('revert');
+    expect(c.github.poisonPill).toEqual({ enabled: false, workflows: [], checks: [], conclusions: ['failure', 'timed_out'] });
     expect(c.failMode).toBe('open');
+    expect(defaultConfig(['main']).github.poisonPill.enabled).toBe(false);
+  });
+
+  it('validates the poison pill', () => {
+    const cfg = (pill: unknown) => JSON.stringify({ version: 1, github: { poisonPill: pill } });
+    expect(() => parseConfig(cfg({ enabled: true }), 'x.json')).toThrow(/github.poisonPill.workflows: list at least one workflow/);
+    expect(() => parseConfig(cfg({ enabled: true, workflows: ['CI'], conclusions: ['exploded'] }), 'x.json')).toThrow(/conclusions/);
+    expect(parseConfig(cfg({ enabled: true, workflows: ['CI'] }), 'x.json').github.poisonPill.conclusions).toEqual(['failure', 'timed_out']);
   });
 
   it('reports invalid configs clearly', () => {
@@ -80,6 +89,20 @@ describe('rendering', () => {
     const wf = renderWorkflow(defaultConfig(['main', 'release/*']), '1.2.3');
     expect(wf).toContain("      - 'main'\n      - 'release/*'");
     expect(wf).toContain('npx --yes vcs-protection@1.2.3 ci-guard');
+    expect(wf).not.toContain('workflow_run');
+    expect(wf).not.toContain('checks: read');
+    expect(wf).toContain('${{ github.event.ref || github.event.pull_request.number }}');
+  });
+
+  it('workflow listens to critical workflows when the poison pill is on', () => {
+    const c = defaultConfig(['main', 'release/*']);
+    c.github.poisonPill = { enabled: true, workflows: ['CI', "Bob's E2E"], checks: [], conclusions: ['failure'] };
+    const wf = renderWorkflow(c, '1.2.3');
+    expect(wf).toContain(
+      "  workflow_run:\n    workflows: ['CI', 'Bob''s E2E']\n    types: [completed]\n    branches:\n      - 'main'\n      - 'release/*'\n\npermissions:",
+    );
+    expect(wf).toContain('  statuses: write\n  checks: read\n  actions: read\n');
+    expect(wf).toContain('|| github.event.workflow_run.head_branch }}');
   });
 
   it('merge messages include a PR compare link', () => {

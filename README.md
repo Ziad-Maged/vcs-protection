@@ -101,7 +101,8 @@ GitHub API access (for `audit` and automatic PR creation) uses `GITHUB_TOKEN`, t
   "github": {
     "enforcement": "revert",
     "rescueBranchPrefix": "vcs-protection/rescue/",
-    "bypassUsers": []
+    "bypassUsers": [],
+    "poisonPill": { "enabled": false, "workflows": [], "checks": [], "conclusions": ["failure", "timed_out"] }
   },
   "failMode": "open"
 }
@@ -112,6 +113,7 @@ GitHub API access (for `audit` and automatic PR creation) uses `GITHUB_TOKEN`, t
 - **`bypass.allowed`**: whether `VCS_PROTECTION_BYPASS="<reason>"` works locally. Every use is appended to `.git/vcs-protection/audit.log`.
 - **`github.enforcement`**: `revert` resets the branch, saves the commits to a rescue branch and opens an issue. `report` only opens the issue.
 - **`github.bypassUsers`**: GitHub logins whose direct pushes the guard allows, such as release managers.
+- **`github.poisonPill`**: revert approved merges that break critical CI workflows. See [Poison pill](#poison-pill).
 - **`failMode`**: what the hooks do if the CLI is missing or crashes. `open` warns and allows; `closed` blocks.
 
 **Rules protect themselves.** Hooks read the config from the remote default branch (`origin/HEAD`), not from your working tree. Editing the file on a feature branch changes nothing until that change is approved and merged. The guard judges each push by the config as it was *before* the push.
@@ -123,6 +125,24 @@ The workflow runs `npx vcs-protection@<version> ci-guard`:
 - **Push to a protected branch:** the push is accepted only if its head commit is the merge commit of a PR into that branch with enough approvals. Force pushes, direct pushes, and PRs merged in the UI with too few approvals are reverted with a compare-and-swap check, so newer pushes are never overwritten.
 - **Pull requests into a protected branch:** the guard posts a `vcs-protection/approvals` commit status (for example "1/2 approvals: merging now will be reverted"), so reviewers can see this before they merge.
 - **Protected branch deleted:** the guard recreates it when GitHub sends the push event. Otherwise it opens an issue with restore instructions.
+
+"Reverted" means the guard force-resets the branch to the commit before the push, and only while the pushed commit is still the branch tip. This compare-and-swap check means a newer push is never overwritten; in that case the guard only saves the rescue branch and opens the issue.
+
+### Poison pill
+
+An approved PR can still break the build. With the poison pill on, the guard also watches your critical CI workflows. When one of them fails on a commit pushed to a protected branch, the guard treats it as a breach and runs the same remediation: rescue branch, reset, issue.
+
+```json
+"github": {
+  "poisonPill": { "enabled": true, "workflows": ["CI"], "checks": ["test"], "conclusions": ["failure", "timed_out"] }
+}
+```
+
+- **`workflows`** (required when enabled): the `name:` of each critical workflow. The generated guard adds a `workflow_run` trigger for them, so it wakes up when they *finish*. There is no polling or sleep.
+- **`checks`**: optional job (check-run) names that count. Empty means every job of the finished workflow.
+- **`conclusions`**: check-run results that count as a breach: `failure` and `timed_out` by default; `cancelled`, `action_required` and `startup_failure` are also allowed.
+
+The guard reads the results from GitHub's check-runs API, and only for runs triggered by a `push` (failing PR builds are ignored). It judges by the rules as they were before the commit. A check that already failed on the commit's parent is treated as inherited, so an innocent PR merged on top of a broken one is never rolled back. If newer commits already landed on top of the broken one, it does **not** reset the branch. Instead the issue lists the failing checks and gives the exact `git revert` command to undo it through a PR. `github.bypassUsers` doesn't apply to the poison pill. After changing the setting, run `vcs-protection github setup` on the same branch and merge the config and the regenerated workflow together through a PR.
 
 ## Limitations
 

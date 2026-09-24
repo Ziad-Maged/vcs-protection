@@ -23,6 +23,13 @@ export function requireEffectiveConfig(): LoadedConfig {
   return loaded;
 }
 
+/** The working-tree config if there is one (the version being edited), else the effective rules. */
+export function workingConfig(): Config {
+  const file = localConfigPath();
+  if (file && existsSync(file)) return parseConfig(readFileSync(file, 'utf8'), file);
+  return requireEffectiveConfig().config;
+}
+
 export function writeConfig(file: string, config: Config): void {
   writeFileSync(file, serializeConfig(config));
 }

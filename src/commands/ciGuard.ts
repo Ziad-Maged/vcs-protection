@@ -5,10 +5,13 @@ import {
   handleDeleteEvent,
   handlePrEvent,
   judgePush,
+  judgeWorkflowRun,
+  poisonPillPrecheck,
   remediatePush,
   type DeleteEvent,
   type PrEvent,
   type PushEvent,
+  type WorkflowRunEvent,
 } from '../github/guard.js';
 import type { GitHubRepo } from '../github/remote.js';
 import { info } from '../ui.js';
@@ -76,6 +79,31 @@ export async function ciGuard(): Promise<number> {
     if (check) summary([`PR #${pr.pull_request.number}: ${check.description}${check.ok ? '' : ' (not enough to merge)'}`]);
     // Informational only: a failing status is enough, the job itself succeeds.
     return 0;
+  }
+
+  if (eventName === 'workflow_run') {
+    const wr = event as WorkflowRunEvent;
+    const run = wr.workflow_run;
+    // Judge by the rules before the commit landed, so a breaking commit can't switch the poison pill off.
+    const parent = (await client.getCommit(run.head_sha)).parents[0]?.sha ?? run.head_sha;
+    const config = await configAt(client, parent);
+    if (!config) {
+      summary([`No ${CONFIG_FILE} at ${parent}; nothing to enforce.`]);
+      return 0;
+    }
+    const pre = poisonPillPrecheck(run, config);
+    if (pre.ok) {
+      summary([`Poison pill: ignoring '${run.name}' on ${run.head_branch ?? '?'}: ${pre.verdict.reason}.`]);
+      return 0;
+    }
+    const { verdict, push } = await judgeWorkflowRun(wr, config, client);
+    if (verdict.ok || !push) {
+      summary([`✅ ${run.head_branch}: ${verdict.reason}`]);
+      return 0;
+    }
+    const result = await remediatePush(push, verdict, config, client);
+    summary([`❌ ${verdict.reason}`, ...(verdict.details ?? []).map((d) => `  - ${d}`), ...result.actions.map((a) => `- ${a}`)]);
+    return 1;
   }
 
   summary([`Ignoring event '${eventName}'.`]);
