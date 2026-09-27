@@ -42,8 +42,10 @@ const gitConfig = (cwd: string, key: string) => {
 const caseInsensitiveFs = (cwd: string) => {
   const configured = gitConfig(cwd, 'core.ignorecase');
   if (configured === 'true' || configured === 'false') return configured === 'true';
-  const probe = path.join(cwd, '.git', `vcsp-case-check-${process.pid}-${Date.now()}`);
-  const alias = probe.toUpperCase();
+  const dir = path.join(cwd, '.git');
+  const name = `vcsp-case-check-${process.pid}-${Date.now()}`;
+  const probe = path.join(dir, name);
+  const alias = path.join(dir, name.toUpperCase());
   writeFileSync(probe, '');
   try {
     return probe !== alias && existsSync(alias);

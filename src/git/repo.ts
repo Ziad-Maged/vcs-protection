@@ -44,8 +44,10 @@ export function currentBranch(cwd?: string): string | null {
 export function ignoreCaseRefs(cwd?: string): boolean {
   const configured = gitMaybe(['config', '--bool', 'core.ignorecase'], { cwd });
   if (configured === 'true' || configured === 'false') return configured === 'true';
-  const probe = path.join(commonGitDir(cwd), `vcsp-case-check-${process.pid}-${Date.now()}`);
-  const alias = probe.toUpperCase();
+  const dir = commonGitDir(cwd);
+  const name = `vcsp-case-check-${process.pid}-${Date.now()}`;
+  const probe = path.join(dir, name);
+  const alias = path.join(dir, name.toUpperCase());
   writeFileSync(probe, '');
   try {
     return probe !== alias && existsSync(alias);
