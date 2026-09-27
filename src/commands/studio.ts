@@ -42,12 +42,8 @@ export async function studio(opts: StudioOptions): Promise<number> {
     server.listen(port, '127.0.0.1', resolve);
   });
 
-  const url = studioServer.url();
-  info(`${c.green('✔')} Studio running at ${c.cyan(url)}`);
-  info(c.dim('  Only this computer can reach it, and only with this link. Press Ctrl+C to stop.'));
-  if (opts.open !== false) openBrowser(url);
-
-  await new Promise<void>((resolve) => {
+  // Listen for Ctrl+C before printing the link, so a stop right after it still shuts down cleanly.
+  const stopped = new Promise<void>((resolve) => {
     const stop = () => {
       process.off('SIGINT', stop);
       process.off('SIGTERM', stop);
@@ -57,6 +53,13 @@ export async function studio(opts: StudioOptions): Promise<number> {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
   });
+
+  const url = studioServer.url();
+  info(`${c.green('✔')} Studio running at ${c.cyan(url)}`);
+  info(c.dim('  Only this computer can reach it, and only with this link. Press Ctrl+C to stop.'));
+  if (opts.open !== false) openBrowser(url);
+
+  await stopped;
   info('Studio stopped.');
   return 0;
 }

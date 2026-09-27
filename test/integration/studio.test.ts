@@ -181,6 +181,7 @@ describe('studio: lifecycle', () => {
   // child.kill() on Windows is always TerminateProcess, so a SIGINT handler can't be exercised from a test.
   it.skipIf(process.platform === 'win32')('stops cleanly on Ctrl+C', async () => {
     const s = await startStudio(tmp);
+    expect((await api(s, '/api/state')).status).toBe(200);
     const exit = new Promise<number | null>((r) => s.child.on('exit', (code) => r(code)));
     s.child.kill('SIGINT');
     expect(await exit).toBe(0);
