@@ -167,11 +167,20 @@ describe('studio: actions', () => {
 });
 
 describe('studio: lifecycle', () => {
-  it('works outside a git repository (machine section only) and stops cleanly on Ctrl+C', async () => {
+  it('works outside a git repository (machine section only)', async () => {
     const plain = path.join(tmp, 'plain');
     mkdirSync(plain);
     const s = await startStudio(plain);
-    expect((await api(s, '/api/state')).json().repo).toBeNull();
+    try {
+      expect((await api(s, '/api/state')).json().repo).toBeNull();
+    } finally {
+      s.child.kill('SIGKILL');
+    }
+  });
+
+  // child.kill() on Windows is always TerminateProcess, so a SIGINT handler can't be exercised from a test.
+  it.skipIf(process.platform === 'win32')('stops cleanly on Ctrl+C', async () => {
+    const s = await startStudio(tmp);
     const exit = new Promise<number | null>((r) => s.child.on('exit', (code) => r(code)));
     s.child.kill('SIGINT');
     expect(await exit).toBe(0);
