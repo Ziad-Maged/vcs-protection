@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { readAuditLog } from '../audit/log.js';
-import { globalTemplateDir } from '../commands/install.js';
+import { currentTemplateDir, globalTemplateDir } from '../commands/install.js';
+import { sameText } from '../commands/shared.js';
 import { loadConfig, localConfigPath } from '../config/load.js';
 import { parseConfig, type Config } from '../config/schema.js';
 import { gitMaybe } from '../git/exec.js';
@@ -47,7 +48,7 @@ function tokenAvailable(): boolean {
 
 function globalState(): StudioState['global'] {
   const templateDir = globalTemplateDir();
-  const current = gitMaybe(['config', '--global', 'init.templateDir']);
+  const current = currentTemplateDir();
   const installed = !!current && path.resolve(current) === path.resolve(templateDir);
   return { templateDir, current, installed, foreign: !!current && !installed };
 }
@@ -83,7 +84,7 @@ function repoState(root: string): RepoState {
     workflow.present = true;
     workflow.pinned = current.match(/vcs-protection@([^\s]+)/)?.[1] ?? null;
     const target = workingConfig ?? loaded?.config;
-    workflow.inSync = target ? current === renderWorkflow(target, workflow.pinned ?? VERSION) : null;
+    workflow.inSync = target ? sameText(current, renderWorkflow(target, workflow.pinned ?? VERSION)) : null;
   }
   const bypasses = readAuditLog();
 

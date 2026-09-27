@@ -74,7 +74,7 @@ export async function shareChange(config: Config, summary: string, opts: RuleCha
     info(`Push ${branch} and open a pull request into ${base}.`);
     return;
   }
-  git(['push', '-u', config.remote, branch]);
+  git(['push', '-u', '--', config.remote, branch]);
   info(`${c.green('✔')} Pushed ${branch}`);
 
   const client = githubClient(config);

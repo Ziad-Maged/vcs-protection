@@ -207,11 +207,20 @@ describe('postinstall: global install', () => {
   const ours = path.join(home, '.vcs-protection', 'git-template');
   const wrapper = installPackageAt(path.join(tmp, 'global', 'lib', 'node_modules', 'vcs-protection'));
 
-  it('sets init.templateDir and is idempotent', () => {
+  it('leaves init.templateDir alone with VCS_PROTECTION_SKIP_GLOBAL', () => {
+    const r = postinstall(wrapper, tmp, { npm_config_global: 'true', VCS_PROTECTION_SKIP_GLOBAL: '1' });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('VCS_PROTECTION_SKIP_GLOBAL is set');
+    expect(templateDir()).toBe('');
+  });
+
+  it('sets init.templateDir, says so, and is idempotent', () => {
     for (let i = 0; i < 2; i++) {
       const r = postinstall(wrapper, tmp, { npm_config_global: 'true' });
       expect(r.code, r.out).toBe(0);
       expect(path.resolve(templateDir())).toBe(path.resolve(ours));
+      expect(r.out).toContain('changed your global git config');
+      expect(r.out).toContain('vcs-protection uninstall --global');
     }
     expect(existsSync(path.join(ours, 'hooks', 'reference-transaction'))).toBe(true);
   });
@@ -220,6 +229,13 @@ describe('postinstall: global install', () => {
     const repo = path.join(tmp, 'fresh-clone');
     gitOk(tmp, 'init', '-q', repo);
     expect(managed(repo, 'reference-transaction')).toBe(true);
+  });
+
+  it('recognises its own template written with ~', () => {
+    gitOk(tmp, 'config', '--global', 'init.templateDir', '~/.vcs-protection/git-template');
+    const r = postinstall(wrapper, tmp, { npm_config_global: 'true' });
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain('already set');
   });
 
   it('leaves a foreign init.templateDir alone', () => {

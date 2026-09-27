@@ -6,7 +6,7 @@ It works on two layers:
 
 | Layer | What it does | Can it be bypassed? |
 |---|---|---|
-| **Local git hooks** (every teammate's clone) | Blocks commits, merges, resets, rebases and pushes that would change a protected branch, and **`git commit --no-verify` too** | Only by uninstalling the hooks or using the logged emergency bypass |
+| **Local git hooks** (every teammate's clone) | Blocks commits, merges, resets, rebases and pushes that would change a protected branch, and **`git commit --no-verify` too** | By uninstalling the hooks, using the logged emergency bypass, or `git push --no-verify` (which skips the push check; the GitHub guard then reverts the push) |
 | **GitHub Actions guard** (on the remote) | Checks every push to a protected branch, plus a sweep every 30 minutes. Anything that isn't the merge of a PR approved by people with write access is **reverted**: the commits are saved to a rescue branch and an issue is opened | Only by deliberately removing the workflow from the default branch, or forging its markers (see [Limitations](#limitations)) |
 
 ## How `--no-verify` is blocked
@@ -60,7 +60,7 @@ The package has a `postinstall` script, so nobody has to run `init` by hand:
   ```
 
   npm 12 blocks dependency install scripts unless they are listed in the `allowScripts` field of `package.json`; the second command adds the entry. npm 11 runs the script but prints a warning; earlier versions just run it.
-- **Global install:** `npm i -g vcs-protection` (npm >= 12: `npm i -g --allow-scripts=vcs-protection vcs-protection`) sets git's `init.templateDir`, so every future `git clone` gets the hooks. If you already have a different `init.templateDir`, it is left alone; run `vcs-protection install --global --force` to replace it. Clones that already exist still need `vcs-protection init`.
+- **Global install:** `npm i -g vcs-protection` (npm >= 12: `npm i -g --allow-scripts=vcs-protection vcs-protection`) sets git's global `init.templateDir`, so every future `git clone` on the machine gets the hooks, and prints a notice saying so (undo with `vcs-protection uninstall --global`). Set `VCS_PROTECTION_SKIP_GLOBAL=1` to install the command without touching your git config. If you already have a different `init.templateDir`, it is left alone; run `vcs-protection install --global --force` to replace it. Clones that already exist still need `vcs-protection init`.
 
 The automatic setup never fails `npm install`, never creates a config, and does nothing when:
 
@@ -139,7 +139,8 @@ Every action shows the same messages the command would print, and changes still 
 }
 ```
 
-- **`pattern`**: a branch name or glob. `release/*` matches `release/1.0` but not `release/1.0/x`; use `release/**` for any depth.
+- **`remote`**: the remote that stands for the shared repository. Letters, digits, `.`, `_` and `-` only.
+- **`pattern`**: a branch name or glob. `release/*` matches `release/1.0` but not `release/1.0/x`; use `release/**` for any depth. On Windows and macOS (where git sets `core.ignorecase`), the local hooks match regardless of case, because `MAIN` and `main` are the same branch there; pushes and the GitHub guard stay case-sensitive, like GitHub.
 - **`requiredApprovals`**: how many approvals a PR needs. Only reviewers with **write access** count (like GitHub's own protection). Each reviewer's latest review counts, dismissed reviews don't count, and the PR author never counts. Outstanding "changes requested" also fails the check.
 - **`bypass.allowed`**: whether `VCS_PROTECTION_BYPASS="<reason>"` works locally. Every use is appended to `.git/vcs-protection/audit.log`.
 - **`github.enforcement`**: `revert` resets the branch, saves the commits to a rescue branch and opens an issue. `report` only opens the issue.
@@ -151,7 +152,7 @@ Every action shows the same messages the command would print, and changes still 
 - **`github.poisonPill`**: revert approved merges that break critical CI workflows. See [Poison pill](#poison-pill).
 - **`failMode`**: what the hooks do if the CLI is missing or crashes. `open` warns and allows; `closed` blocks.
 
-**Rules protect themselves.** Hooks read the config from the remote default branch (`origin/HEAD`), not from your working tree. Editing the file on a feature branch changes nothing until that change is approved and merged. The GitHub guard only uses the rules in commits it has verified: an unreviewed commit that deletes the file, breaks it, or removes a branch from `protected` changes nothing, and is itself reverted.
+**Rules protect themselves.** Hooks read the config from the remote default branch (`origin/HEAD`), not from your working tree. Editing the file on a feature branch changes nothing until that change is approved and merged, and neither does pointing its `remote` somewhere else or breaking its JSON: the working-tree copy is only used when no remote has a config yet. If the rules can't be read at all, the hooks follow the `failMode` they were installed with. The GitHub guard only uses the rules in commits it has verified: an unreviewed commit that deletes the file, breaks it, or removes a branch from `protected` changes nothing, and is itself reverted.
 
 ## The GitHub guard
 
@@ -188,6 +189,9 @@ The guard reads the results from GitHub's check-runs API, and only for runs trig
 These are guardrails, not a security boundary. Real enforcement needs GitHub's server-side protection: rulesets or branch protection on a plan that includes them for private repos.
 
 - Anyone can remove local hooks (`rm .git/hooks/*`, `vcs-protection uninstall`). `doctor`, the self-repair on checkout/merge, and the GitHub guard reduce the impact.
+- `git push --no-verify` skips the `pre-push` check, and nothing else can stop a push locally. The GitHub guard reverts what it lets through.
+- Moving a remote-tracking ref by hand (`git update-ref refs/remotes/origin/main <commit>`) and then the branch in a *separate* command looks like a sync to the hooks: locally, that can't be told apart from a fetch. The push is still blocked, and the guard catches it if it is forced through.
+- A push to the shared repository is recognised by remote name, by any fetch or push URL of that remote, by GitHub owner/repo, and by local path. Another spelling of a non-GitHub URL (an SSH alias, a different host name) isn't; the guard still catches such a push.
 - A push run uses the workflow file **from the pushed commit**, so a direct push that also deletes or edits the guard isn't checked by its own run. The sweep runs from the default branch's copy and catches it within 30 minutes, unless the guard was removed from the default branch too. `[skip ci]` pushes are likewise caught by the next run or the sweep, not instantly.
 - The accepted marker trusts statuses from `github-actions[bot]`. A personal token can't post those, but a workflow someone adds on a branch can: deliberate sabotage is possible. `vcs-protection audit` ignores markers.
 - The poison pill reports each broken commit once; re-running its CI doesn't open another issue.

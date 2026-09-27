@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
@@ -221,6 +222,86 @@ describe('hook management', () => {
     expect(r.out).toContain('Repaired git hooks: reference-transaction');
     expect(existsSync(hook)).toBe(true);
     gitOk(alice, 'switch', 'main');
+  });
+});
+
+describe('attempts to get around the local rules', () => {
+  const erin = path.join(tmp, 'erin');
+  const configFile = path.join(erin, '.vcs-protection.json');
+  /** A commit on top of origin/main that exists only locally (commit-tree moves no ref, so no hook runs). */
+  const localOnly = (msg: string) => gitOk(erin, 'commit-tree', 'origin/main^{tree}', '-p', 'origin/main', '-m', msg);
+
+  beforeAll(() => {
+    gitOk(tmp, 'clone', origin, erin);
+    const init = cli(erin, 'init');
+    expect(init.code, init.out).toBe(0);
+  });
+
+  it('a working-tree config naming another remote does not switch the rules off', () => {
+    writeFileSync(configFile, '{"version":1,"remote":"nope","protected":[]}\n');
+    const r = commitFile(erin, 'redirect.txt');
+    expect(r.code, r.out).not.toBe(0);
+    expect(r.out).toContain("protected branch 'main'");
+    gitOk(erin, 'reset', '-q', '--hard', 'HEAD');
+  });
+
+  it('a broken working-tree config does not hide the rules on the remote', () => {
+    writeFileSync(configFile, '{');
+    const r = commitFile(erin, 'broken.txt');
+    expect(r.code, r.out).not.toBe(0);
+    expect(r.out).toContain("protected branch 'main'");
+    expect(r.out).not.toContain('Internal error');
+    gitOk(erin, 'reset', '-q', '--hard', 'HEAD');
+  });
+
+  it('rules that cannot be read follow the failMode of the installed hooks', () => {
+    // No remote: the working-tree file is the only source, and it's broken.
+    const solo = path.join(tmp, 'solo');
+    gitOk(tmp, 'init', '-b', 'main', solo);
+    writeFileSync(path.join(solo, '.vcs-protection.json'), '{"version":1,"protected":[{"pattern":"main"}],"failMode":"closed"}\n');
+    expect(cli(solo, 'init').code).toBe(0);
+    writeFileSync(path.join(solo, '.vcs-protection.json'), '{');
+    const r = commitFile(solo, 'x.txt');
+    expect(r.code, r.out).not.toBe(0);
+    expect(r.out).toContain('failMode is "closed": blocking the operation');
+  });
+
+  it('blocks a case-only variant of a protected branch on case-insensitive filesystems', () => {
+    if (gitOk(erin, 'config', '--bool', 'core.ignorecase') !== 'true') return; // Linux: MAIN is a separate branch
+    const before = head(erin, 'main');
+    const r = git(erin, 'update-ref', 'refs/heads/MAIN', localOnly('case'));
+    expect(r.code, r.out).not.toBe(0);
+    expect(head(erin, 'main')).toBe(before);
+  });
+
+  it('blocks moving the remote-tracking ref and the branch together in one transaction', () => {
+    const next = localOnly('forged sync');
+    const before = head(erin, 'origin/main');
+    const r = spawnSync('git', ['update-ref', '--stdin'], {
+      cwd: erin,
+      env,
+      encoding: 'utf8',
+      input: `start\nupdate refs/remotes/origin/main ${next}\nupdate refs/heads/main ${next}\ncommit\n`,
+    });
+    expect(r.status, `${r.stdout}${r.stderr}`).not.toBe(0);
+    expect(head(erin, 'main')).toBe(before);
+    expect(head(erin, 'origin/main')).toBe(before);
+  });
+
+  it('blocks pushes to the shared remote by relative path, file:// URL, and from a subdirectory', () => {
+    const next = localOnly('push by path');
+    const rel = path.relative(erin, origin);
+    // git resolves a relative push URL from the top of the working tree, even in a subdirectory.
+    for (const [cwd, target] of [
+      [erin, rel],
+      [erin, pathToFileURL(origin).href],
+      [path.join(erin, 'sub'), rel],
+    ] as const) {
+      mkdirSync(cwd, { recursive: true });
+      const r = git(cwd, 'push', target, `${next}:refs/heads/main`);
+      expect(r.code, `${target}: ${r.out}`).not.toBe(0);
+      expect(r.out).toContain("Pushing directly to protected branch 'main'");
+    }
   });
 });
 

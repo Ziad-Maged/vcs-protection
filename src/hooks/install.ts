@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitOk } from '../git/exec.js';
@@ -64,11 +64,21 @@ export interface HooksLocation {
   ignored: boolean;
 }
 
+function canonical(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return path.resolve(p); // doesn't exist yet
+  }
+}
+
 /** Where hooks go for this repository, and whether that place is part of the working tree. */
 export function hooksLocation(cwd?: string): HooksLocation {
   const dir = hooksDir(cwd);
   const root = repoRoot(cwd);
-  const rel = root ? path.relative(root, dir) : '';
+  // git prints a canonical toplevel, while `dir` is resolved against the cwd (maybe a symlink or an
+  // 8.3 short name): compare canonical forms, or an in-tree directory can look like it's outside.
+  const rel = root ? path.relative(canonical(root), canonical(dir)) : '';
   const inWorkTree = !!root && rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== '.git';
   const ignored = inWorkTree && gitOk(['check-ignore', '-q', path.join(rel, HOOKS[0])], { cwd: root! });
   return { dir, inWorkTree, ignored };

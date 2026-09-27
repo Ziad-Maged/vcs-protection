@@ -26,7 +26,7 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | `audit`, `audit --since --limit`, `audit` without a token | 12 |
 | `install --global`, `install --global --force` | 6, 14 |
 | `studio`, `studio --port`, `--no-open`: every section, actions matching the CLI, confirmations, validation errors, token/Host/Origin checks, outside a repository | 14 |
-| Automatic setup on `npm i -g` (sets `init.templateDir`; leaves a foreign one alone) | 2, 6 |
+| Automatic setup on `npm i -g` (sets `init.templateDir` with a notice; `VCS_PROTECTION_SKIP_GLOBAL`; leaves a foreign one alone) | 2, 6 |
 | Automatic setup on `npm install` as a dependency (hooks → `node_modules` copy), `npm ci` on a fresh clone | 6 |
 | `npm install-scripts approve` / `--allow-scripts` (npm ≥ 12) | 2, 6 |
 | Opt-outs: `VCS_PROTECTION_SKIP_INSTALL=1`, `CI=true`, `--ignore-scripts` | 6 |
@@ -38,6 +38,8 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | Approvals only from write access; `dismissStaleApprovals` | 8, 10 |
 | Atomic reset; deleted branch restored from the activity log | 8, 10 |
 | Local: `git branch -f` / `update-ref` on a protected branch, push by URL, hook exit code 3 | 5, 7 |
+| Local tampering: case-only branch names (Windows/macOS), `update-ref --stdin` moving `origin/main` too, a working-tree config naming another remote or with broken JSON | 5 |
+| `push --no-verify` is the documented local gap (the guard reverts it) | 10 |
 | Trusted rules only from verified commits: deleted config (C1), `[skip ci]` unprotect (C2); per-branch markers; baseline (automatic at bootstrap, **Run workflow → baseline** otherwise); bypass pushes via the activity log; poison pill reported once | 4, 10 |
 | Poison pill: `github.poisonPill`, `workflow_run` trigger, reset, moved tip (`git revert`), inherited failures, idempotent re-runs | 10 |
 | `postinstall` (internal; run by npm) | 2, 6 |
@@ -153,10 +155,11 @@ npm i -g --foreground-scripts "--allow-scripts=file:$PKG/vcs-protection-1.0.0.tg
 
 **Expected:**
 - `vcs-protection-1.0.0.tgz` is created in `PKG`, and the global install succeeds.
-- The install shows `> node scripts/postinstall.mjs` followed by `✔ vcs-protection: new clones will get the git hooks automatically (init.templateDir=…/.vcs-protection/git-template).`
+- The install shows `> node scripts/postinstall.mjs` followed by `✔ vcs-protection: new clones will get the git hooks automatically (init.templateDir=…/.vcs-protection/git-template).`, then a notice that this changed your global git config for every new clone, with `Undo: vcs-protection uninstall --global. Skip this step next time: VCS_PROTECTION_SKIP_GLOBAL=1.`
 - `git config --global init.templateDir` prints that directory. **From now on every new clone gets the 6 hooks without `init`** (they stay inactive in repos without a config).
 - npm 11 may add `npm warn install-scripts … not yet covered by allowScripts`. That is npm's notice, not an error. On npm ≥ 12 without the `--allow-scripts` flag you see `…had install scripts blocked…` instead, and `init.templateDir` stays unset.
 - If `init.templateDir` was already set to something else, the install prints `vcs-protection: git's init.templateDir is already set to '…'; left it unchanged.` and changes nothing (tested again in 6.6).
+- Optional: with `VCS_PROTECTION_SKIP_GLOBAL=1` set (**PS:** `$env:VCS_PROTECTION_SKIP_GLOBAL='1'`), a reinstall prints `VCS_PROTECTION_SKIP_GLOBAL is set; git's init.templateDir was not changed.` Unset it again afterwards.
 
 > Installing the tarball is the closest thing to a real `npm i -g vcs-protection`. For fast code-edit loops you can use `npm link` in `PKG` instead. Re-run `npm pack` + `npm i -g` before any GitHub-side test (Phase 3.4 explains why).
 
@@ -614,13 +617,45 @@ git branch -f main feature/local; echo "exit=$?"               # refused by git 
 git update-ref refs/heads/main feature/local; echo "exit=$?"
 git branch -f release/9 feature/local; echo "exit=$?"
 git push "$(git remote get-url origin)" feature/local:main; echo "exit=$?"
+git update-ref refs/heads/MAIN feature/local; echo "exit=$?"   # Windows/macOS only: MAIN is main there
+L=$(git rev-parse feature/local)
+printf "start\nupdate refs/remotes/origin/main $L\nupdate refs/heads/main $L\ncommit\n" | git update-ref --stdin; echo "exit=$?"
+git rev-parse main origin/main
 git branch -D release/9 feature/local
 ```
+
+**PS** for the last three lines: `$L = git rev-parse feature/local; "start`nupdate refs/remotes/origin/main $L`nupdate refs/heads/main $L`ncommit`n" | git update-ref --stdin; "exit=$LASTEXITCODE"; git rev-parse main origin/main`
 
 **Expected:**
 - `git update-ref` (a forced update, which git reports to the hook with an all-zero old value) is **blocked** with `Merging into protected branch 'main'…` (or `Direct commits…`), not with a "Creating protected branch" message; `main` doesn't move.
 - `git branch -f release/9 feature/local` is **blocked** (`Merging into protected branch 'release/9'…`).
 - The push to the remote's **URL** (instead of the name `origin`) is **blocked** with `Pushing directly to protected branch 'main'`.
+- On Windows and macOS, `git update-ref refs/heads/MAIN …` is **blocked** (`git config core.ignorecase` is `true` there, so `MAIN` matches the `main` rule). On Linux it creates a separate branch `MAIN`, which is allowed; delete it with `git branch -D MAIN`.
+- The `update-ref --stdin` transaction is **blocked** (`ref updates aborted by hook`), and the two hashes printed by `git rev-parse` are still equal to what they were: moving `origin/main` in the same transaction doesn't make the local-only commit look synced.
+
+- [ ] passed
+
+### 5.12 Tampering with the working-tree config
+
+The rules come from `origin/main`. Editing or breaking the copy in the working tree must not change anything:
+
+```bash
+git switch main
+cp .vcs-protection.json "$WORK/rules.bak"
+echo '{"version":1,"remote":"nope","protected":[]}' > .vcs-protection.json
+echo t > tamper.txt && git add tamper.txt && git commit -m "tamper 1"; echo "exit=$?"
+echo '{' > .vcs-protection.json
+git commit -m "tamper 2"; echo "exit=$?"
+vcs-protection doctor
+git reset -q --hard HEAD && rm -f tamper.txt
+```
+
+**PS:** use `Copy-Item .vcs-protection.json "$env:WORK\rules.bak"`, `Set-Content .vcs-protection.json '{"version":1,"remote":"nope","protected":[]}'`, `Set-Content .vcs-protection.json '{'` and `"exit=$LASTEXITCODE"`.
+
+**Expected:**
+- Both commits are **blocked** with `Direct commits to protected branch 'main' are not allowed`. Neither prints `Internal error`: the hooks ignore the working-tree file while `origin/main` has rules.
+- `doctor` reports the broken working-tree file (invalid JSON) but still shows the rules from `refs/remotes/origin/main:.vcs-protection.json`.
+- After the reset, `.vcs-protection.json` is back to the committed version (`git status` is clean).
 
 - [ ] passed
 
@@ -891,6 +926,8 @@ vcs-protection doctor --fix
 - `doctor` shows `✖ hook reference-transaction   missing`, then ``Run `vcs-protection doctor --fix` to repair hooks.`` and `exit=1`.
 - The first `git switch` prints `[vcs-protection] Repaired git hooks: reference-transaction` (post-checkout self-repair).
 - `doctor --fix` shows `✔ hook pre-push   repaired`. Only `GitHub guard` stays ✖ (patched).
+- Upgrading from a version whose shims didn't export `VCSP_FAIL`/`VCSP_REMOTE`: the first `doctor` after the upgrade shows every hook as `outdated`, and the next checkout (or `doctor --fix`) refreshes them.
+- On Windows with `core.autocrlf=true`, a workflow file checked out with CRLF line endings doesn't make `doctor` report the GitHub guard as out of date. Line endings are ignored in that comparison, in `doctor` and in the studio.
 
 - [ ] passed
 
@@ -1139,7 +1176,7 @@ git push --no-verify origin feature/direct:main
 ```
 
 **Expected:**
-- The push succeeds locally, because `--no-verify` skips pre-push.
+- The push succeeds locally, because `--no-verify` skips pre-push. This is the documented local gap (README → Limitations): no local hook can stop it, so the server-side guard is what catches it.
 - The guard then:
   - reports `❌ main <sha7>: Commit <sha7> was pushed directly to 'main' instead of being merged from a pull request.`
   - saves the commit on `vcs-protection/rescue/main-<sha7>`

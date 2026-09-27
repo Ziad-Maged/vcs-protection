@@ -21,6 +21,11 @@ export interface RepoFacts {
    * old value even when the branch exists.
    */
   currentSha(ref: string): string | null;
+  /**
+   * Branch names are case-insensitive in this clone (`core.ignorecase`): `refs/heads/MAIN` is
+   * the same file as `refs/heads/main`, so protection must match regardless of case.
+   */
+  ignoreCase?: boolean;
 }
 
 export type BlockKind =
@@ -73,7 +78,7 @@ export function evaluateRefUpdate(
 ): Decision {
   if (!update.ref.startsWith('refs/heads/')) return { action: 'allow', reason: 'not a local branch' };
   const branch = branchName(update.ref);
-  const rule = ruleFor(config, branch);
+  const rule = ruleFor(config, branch, { nocase: facts.ignoreCase });
   if (!rule) return { action: 'allow', reason: 'branch not protected' };
   if (isZero(update.newSha)) return { action: 'allow', reason: 'local branch deletion' };
   if (update.oldSha === update.newSha) return { action: 'allow', reason: 'no change' };

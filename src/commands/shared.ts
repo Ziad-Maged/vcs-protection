@@ -34,6 +34,11 @@ export function writeConfig(file: string, config: Config): void {
   writeFileSync(file, serializeConfig(config));
 }
 
+/** Compare file contents ignoring line endings (a checkout with core.autocrlf=true has CRLF). */
+export function sameText(a: string, b: string): boolean {
+  return a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
+}
+
 export function workflowFile(): string {
   return path.join(requireRepoRoot(), WORKFLOW_PATH);
 }

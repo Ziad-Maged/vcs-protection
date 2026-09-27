@@ -64,6 +64,19 @@ export function remoteUrl(remote: string, cwd?: string): string | null {
   return gitMaybe(['remote', 'get-url', remote], { cwd });
 }
 
+/** Every URL git uses for `remote`: the fetch URL and all push URLs. */
+export function remoteUrls(remote: string, cwd?: string): string[] {
+  const fetch = remoteUrl(remote, cwd);
+  const push = gitMaybe(['remote', 'get-url', '--push', '--all', remote], { cwd });
+  const urls = [fetch, ...(push ?? '').split('\n')].map((u) => u?.trim()).filter((u): u is string => !!u);
+  return [...new Set(urls)];
+}
+
+/** Whether ref names are case-insensitive in this repository (`core.ignorecase`, set by git on such filesystems). */
+export function ignoresCase(cwd?: string): boolean {
+  return gitMaybe(['config', '--bool', 'core.ignorecase'], { cwd }) === 'true';
+}
+
 /**
  * The remote's default branch as a remote-tracking ref (e.g. refs/remotes/origin/main).
  * Falls back to common names when refs/remotes/<remote>/HEAD is not set.

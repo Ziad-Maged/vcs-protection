@@ -29,6 +29,20 @@ describe('pattern matching', () => {
     expect(isProtected(config, 'feature/x')).toBe(false);
     expect(isProtected(config, 'mainline')).toBe(false);
   });
+
+  it('is case-sensitive unless asked otherwise', () => {
+    expect(isProtected(config, 'MAIN')).toBe(false);
+    expect(isProtected(config, 'MAIN', { nocase: true })).toBe(true);
+    expect(isProtected(config, 'Release/1.0', { nocase: true })).toBe(true);
+  });
+});
+
+describe('evaluateRefUpdate on a case-insensitive filesystem', () => {
+  it('blocks a case-only variant of a protected branch when core.ignorecase is set', () => {
+    const d = evaluateRefUpdate(upd(Z, B, 'refs/heads/MAIN'), config, { ...facts, ignoreCase: true });
+    expect(d).toMatchObject({ action: 'block', kind: 'create', branch: 'MAIN' });
+    expect(evaluateRefUpdate(upd(Z, B, 'refs/heads/MAIN'), config, facts).action).toBe('allow');
+  });
 });
 
 describe('evaluateRefUpdate', () => {

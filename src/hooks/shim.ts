@@ -1,3 +1,5 @@
+import { REMOTE_NAME_RE } from '../config/schema.js';
+
 export const MANAGED_MARKER = '# vcs-protection:managed';
 
 export const HOOKS = [
@@ -44,7 +46,7 @@ const posix = (p: string) => p.replace(/\\/g, '/');
 export function renderShim(o: ShimOptions): string {
   const stdin = STDIN_HOOKS.has(o.hook);
   // Remote names can't contain shell metacharacters that matter here, but stay safe anyway.
-  const remote = /^[A-Za-z0-9._-]+$/.test(o.remote ?? '') ? o.remote! : 'origin';
+  const remote = REMOTE_NAME_RE.test(o.remote ?? '') ? o.remote! : 'origin';
   const advisory = ADVISORY_HOOKS.has(o.hook);
 
   const gate =
@@ -72,6 +74,9 @@ VCSP_HOOK=${sq(o.hook)}
 VCSP_NODE=${sq(posix(o.nodePath))}
 VCSP_CLI=${sq(posix(o.cliPath))}
 VCSP_FAIL=${sq(o.failMode)}
+VCSP_REMOTE=${sq(remote)}
+# The CLI reads the rules from this remote, and falls back to this failMode if it can't read them.
+export VCSP_FAIL VCSP_REMOTE
 VCSP_LOCAL="$(dirname "$0")/${o.hook}.local"
 ${stdin ? 'VCSP_INPUT=$(cat)\n' : ''}
 vcsp_relevant() {

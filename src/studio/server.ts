@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { z } from 'zod';
@@ -25,7 +25,9 @@ class HttpError extends Error {
   }
 }
 
-const sameToken = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** Constant-time comparison; hashing first gives equal-length buffers for any input, even non-ASCII. */
+const digest = (s: string) => createHash('sha256').update(s, 'utf8').digest();
+export const sameToken = (a: string, b: string) => timingSafeEqual(digest(a), digest(b));
 
 function securityHeaders(res: ServerResponse, nonce?: string): void {
   res.setHeader(

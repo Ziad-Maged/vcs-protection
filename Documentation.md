@@ -112,6 +112,9 @@ A global install doesn't touch any repository. It configures git's `init.templat
 
 - It writes the six shims to `~/.vcs-protection/git-template/hooks/` (with `failMode` `open`), and sets `git config --global init.templateDir ~/.vcs-protection/git-template`.
 - From then on, every `git clone` and `git init` copies the shims into the new repository. They do nothing in repositories without a `.vcs-protection.json`.
+- It says so: the install prints that the global git config changed, that this applies to every new clone on the machine, and how to undo it (`vcs-protection uninstall --global`).
+- With `VCS_PROTECTION_SKIP_GLOBAL=1`, it installs only the command and leaves `init.templateDir` alone.
+- The current value is read with `git config --global --type=path`, so a value written as `~/.vcs-protection/git-template` is recognised as ours.
 - If `init.templateDir` is **already set to a different directory**, the install leaves it unchanged and prints how to replace it (`vcs-protection install --global --force`), or to use `vcs-protection init` per clone instead.
 - Clones that already exist aren't changed. Run `vcs-protection init` in them (or `git init` inside them, which copies the template's hooks).
 
@@ -245,7 +248,7 @@ The file lives at the repository root and is committed. It is validated with a s
 |---|---|---|---|
 | `$schema` | string | – | Optional; ignored. Lets editors attach a schema. |
 | `version` | `1` | **required** | Format version. Only `1` is accepted. |
-| `remote` | string | `"origin"` | The remote that represents the shared repository. Rules are read from its default branch, pushes to it (by name, or by a URL/another remote name pointing at the same repository) are checked, and "already on the remote" means on `refs/remotes/<remote>/<branch>`. |
+| `remote` | string: letters, digits, `.`, `_`, `-`, not starting with `-` | `"origin"` | The remote that represents the shared repository. Pushes to it (by name, or by any of its fetch/push URLs, another remote name or a local path pointing at the same repository) are checked, and "already on the remote" means on `refs/remotes/<remote>/<branch>`. The value in the working-tree file doesn't choose where the rules are read from (section 6). |
 | `protected` | array of rules | `[]` | Protected branch rules (below). |
 | `protected[].pattern` | string, non-empty | **required** | Branch name or glob (see 5.3). |
 | `protected[].requiredApprovals` | integer ≥ 0 | `1` | Approvals a PR needs for its merge to be kept by the guard, from people with write access other than the author (12.4). `0` still requires the change to come from a merged PR. |
@@ -261,7 +264,7 @@ The file lives at the repository root and is committed. It is validated with a s
 | `github.poisonPill.workflows` | string[] | `[]` | The `name:` of each critical workflow (exactly as in its YAML). **At least one is required when `enabled` is `true`** (`github.poisonPill.workflows: list at least one workflow name when the poison pill is enabled`). |
 | `github.poisonPill.checks` | string[] | `[]` | Check-run (job) names that count. Empty: every job of the finished critical workflow. |
 | `github.poisonPill.conclusions` | array of `failure`, `timed_out`, `cancelled`, `action_required`, `startup_failure`; at least one | `["failure", "timed_out"]` | Check-run conclusions that count as a breach. |
-| `failMode` | `"open"` \| `"closed"` | `"open"` | What hooks do when the CLI is missing or crashes. `open` warns and allows the operation; `closed` blocks it. |
+| `failMode` | `"open"` \| `"closed"` | `"open"` | What hooks do when the CLI is missing, crashes, or can't read the rules. `open` warns and allows the operation; `closed` blocks it. Baked into the hooks at install time, so a broken config can't turn it off. |
 
 ### 5.3 Patterns
 
@@ -275,6 +278,8 @@ Patterns are matched against the short branch name (`release/1.0`, not `refs/hea
 | `{main,develop}` | `main`, `develop` | |
 | `hotfix-*` | `hotfix-123` | `hotfix/123` |
 
+**Case.** In clones where git sets `core.ignorecase=true` (the default on Windows and macOS), the local ref-update and `pre-commit` checks match with `nocase`: there `refs/heads/MAIN` and `refs/heads/main` are the same file, so `MAIN` is protected by `main`. Pushes (`pre-push`) and the GitHub guard stay case-sensitive, because on GitHub they are different branches.
+
 When several rules match a branch, the **first** one in the array wins. `protect` appends new and changed rules to the end, so put more specific patterns first if you edit the file by hand.
 
 ### 5.4 Changing the configuration
@@ -287,13 +292,13 @@ Use `protect` / `unprotect` (they also regenerate the workflow's branch list and
 
 Every command and hook loads the rules the same way:
 
-1. Read the working-tree `.vcs-protection.json`, if present, only to learn the `remote` name (default `origin`).
-2. Find the remote's default branch: `refs/remotes/<remote>/HEAD`, else `refs/remotes/<remote>/main`, else `refs/remotes/<remote>/master`.
-3. If that ref has a `.vcs-protection.json`, use it (`source: remote`, location `refs/remotes/origin/main:.vcs-protection.json`).
-4. Otherwise, use the working-tree file (`source: local`). This covers the initial setup before the rules are merged, and repositories without a remote.
+1. List the candidate remotes, most trusted first: the remote baked into the hook shim (`VCSP_REMOTE`, from the rules at install time; hooks only), then `origin`, then every other configured remote. The working-tree file is **not** consulted for this.
+2. For each candidate, find its default branch: `refs/remotes/<remote>/HEAD`, else `refs/remotes/<remote>/main`, else `refs/remotes/<remote>/master`.
+3. The first of those refs that has a `.vcs-protection.json` wins (`source: remote`, location `refs/remotes/origin/main:.vcs-protection.json`). A broken copy there is an error.
+4. Only if no remote has one, use the working-tree file (`source: local`). This covers the initial setup before the rules are merged, and repositories without a remote.
 5. Otherwise there are no rules: hooks do nothing, and commands that need rules ask you to run `init`.
 
-Why the remote copy wins: a teammate who relaxes the rules on a feature branch (or deletes the file) changes nothing, because the hooks keep reading the reviewed copy from `origin/main`. Rules change for everyone only after the PR is merged and fetched.
+Why the remote copy wins: a teammate who relaxes the rules on a feature branch (or deletes the file) changes nothing, because the hooks keep reading the reviewed copy from `origin/main`. Rules change for everyone only after the PR is merged and fetched. Editing the working-tree `remote` to a name that doesn't exist, or breaking the file's JSON, doesn't switch to the local copy either: it is never read while a remote has rules. (`doctor` and the studio still report a broken working-tree file.)
 
 The GitHub guard goes further on the server: it only uses the configuration in commits **it has verified** for the branch (its own markers, 12.3), and those rules change only through verified commits. A push, a `[skip ci]` commit, or a commit that deletes or breaks the file can't disable the check.
 
@@ -320,7 +325,7 @@ Central rule: **a protected branch may only move to commits that already exist o
 | Old commit is an ancestor of the new one (new commits on top) | block `advance` |
 | Anything else (history moved sideways or backwards) | block `rewrite` |
 
-Refs updated earlier in the same transaction are taken into account (for example `git pull`, where `origin/main` and `main` move together, or `git fetch` + checkout in one go).
+A remote-tracking ref updated in the same transaction is taken into account only when that transaction **creates** the local branch (a clone, or a first checkout). For any other update, "on the remote" means the remote-tracking ref as it was before the transaction, so `git update-ref --stdin` can't move `origin/main` and `main` together to a local-only commit. A plain `git pull` is unaffected: git fetches in its own transaction first. A fetch that updates both refs in one transaction (`git fetch --atomic origin main:main` into an existing `main`) can be refused; fetch, then `git merge --ff-only`.
 
 **Allowed examples:** `git pull` (fast-forward), `git pull --rebase` with no local commits, `git reset --hard origin/main`, `git switch main`, creating a protected branch from `origin/main`, deleting a local protected branch.
 
@@ -332,7 +337,7 @@ For each ref being pushed:
 
 | Check | Result |
 |---|---|
-| The push goes to a remote other than `remote`: neither its name, nor its URL (git passes the URL for `git push <url>`), nor another remote name with the same URL | allow |
+| The push goes to a remote other than `remote`: neither its name, nor any of its fetch or push URLs (git passes the URL for `git push <url>`), nor another remote name with the same URL. GitHub URLs are compared by host/owner/repo; local paths and `file://` URLs by their canonical location (a relative path is resolved from the top of the working tree, as git does; case-insensitively on Windows and macOS) | allow |
 | Target isn't a branch, or isn't protected | allow |
 | Local and remote values are equal | allow |
 | Push deletes the branch and the rule has `allowDeletion: true` | allow |
@@ -368,7 +373,10 @@ Every hook is a small POSIX `sh` script, generated by `renderShim` (`src/hooks/s
 
 - `VCSP_NODE`: the absolute path of the Node binary that installed it;
 - `VCSP_CLI`: the absolute path of the CLI (`…/dist/cli.js`) that installed it: the global install, the project's `node_modules` copy, or `VCS_PROTECTION_CLI_PATH` if set;
-- `VCSP_FAIL`: the `failMode` at install time.
+- `VCSP_FAIL`: the `failMode` at install time;
+- `VCSP_REMOTE`: the rules' `remote` at install time (`origin` for the global template).
+
+Both are exported to the CLI: `VCSP_REMOTE` is the first remote the rules are read from (section 6), and `VCSP_FAIL` decides what happens when the rules can't be read (8.5). Shims from versions before this don't export them; they show as `outdated` and are refreshed by the self-repair or `doctor --fix`.
 
 When git runs the hook:
 
@@ -403,7 +411,7 @@ If `core.hooksPath` is set, the hooks go into that directory, and the existing h
 
 ### 8.5 Internal failures
 
-If the CLI throws while running a hook (for example an invalid config on the remote), it prints `Internal error in <hook> hook: …` and then follows `failMode`: `open` allows the operation, `closed` blocks it. If the CLI can't even get that far (it crashes on start, or exits with an unexpected code), the shim applies `failMode` itself (8.2, step 4).
+If the CLI throws while running a hook (for example an invalid config on the remote), it prints `Internal error in <hook> hook: …` and then follows `failMode`: `open` allows the operation, `closed` blocks it. When the error happened while reading the rules, there is no config to take `failMode` from, so the shim's `VCSP_FAIL` (from the rules at install time) decides. If the CLI can't even get that far (it crashes on start, or exits with an unexpected code), the shim applies `failMode` itself (8.2, step 4).
 
 ---
 
@@ -921,7 +929,9 @@ The repository comes from the configured remote's URL. Supported forms: `https:/
 |---|---|---|
 | `VCS_PROTECTION_BYPASS` | hooks | Non-blank reason: let the blocked operation through (if `bypass.allowed`) and log it. |
 | `VCS_PROTECTION_SKIP_INSTALL` | automatic setup | Any value other than empty, `0`, `false`: skip the setup during `npm install`. |
+| `VCS_PROTECTION_SKIP_GLOBAL` | automatic setup | Any value other than empty, `0`, `false`: on `npm i -g`, don't set `init.templateDir`. |
 | `CI` | automatic setup | Any value other than empty, `0`, `false`: skip the setup. |
+| `VCSP_FAIL`, `VCSP_REMOTE` | `hook` | Set by the hook shims (8.2): the install-time `failMode` and `remote`. |
 | `INIT_CWD` | – | Set by npm (where `npm install` was run). Not used for choosing the repository any more; see 4.1. |
 | `npm_config_global`, `npm_config_location` | automatic setup | Set by npm: `true` / `global` selects global mode. |
 | `VCS_PROTECTION_CLI_PATH` | hook installation | Overrides the CLI path embedded in shims (useful for packaging or tests). |
@@ -976,6 +986,9 @@ The repository comes from the configured remote's URL. Supported forms: `https:/
 ## 18. Limitations
 
 - **Local hooks can be removed.** `rm .git/hooks/*`, `vcs-protection uninstall`, `npm install --ignore-scripts` and not running the setup all leave a clone unprotected. Self-repair on checkout/merge, `doctor`, the automatic setup on every `npm install`, and the GitHub guard reduce the impact.
+- **`git push --no-verify` skips the push check.** `pre-push` is the only local hook that sees a push, and `--no-verify` skips it; the `reference-transaction` hook doesn't run for the remote's refs. The GitHub guard reverts such a push.
+- **Remote-tracking refs can be moved by hand.** `git update-ref refs/remotes/origin/main <commit>` followed, in a *separate* command, by a move of `main` looks like a sync: locally it can't be told apart from a fetch. (Doing both in one transaction is blocked, 7.1.) The push is still blocked by `pre-push`, and the guard catches it if it is forced through.
+- **Other spellings of a non-GitHub URL.** `pre-push` recognises the shared repository by remote name, by its fetch and push URLs, by GitHub owner/repo, and by local path. An SSH alias or a different host name for a self-hosted server isn't recognised; the guard still catches the push.
 - **Push runs use the pushed commit's workflow file.** A direct push that also deletes or edits `vcs-protection-guard.yml` isn't checked by its own push run. The sweep runs from the default branch's copy and catches the commits on its next run (up to `github.sweep` later) — unless the same push also removed the workflow from the default branch. `vcs-protection audit` finds such commits afterwards.
 - **`[skip ci]` delays the check.** A commit message with `[skip ci]` makes GitHub skip every `push` workflow. The next push run or the sweep (every 30 minutes by default) judges it; with `github.sweep: null` only the next push does.
 - **Markers can be forged by a workflow.** The accepted marker trusts statuses created by `github-actions[bot]`. Personal tokens can't post as that account, but a workflow added on a branch can (its `GITHUB_TOKEN` posts as `github-actions[bot]`). This is deliberate sabotage, not a mistake, and `audit` (which ignores markers) still reports the commits.
@@ -1102,14 +1115,15 @@ After a build, `npm install` in this repository still doesn't install hooks here
 
 | Suite | What it covers |
 |---|---|
-| `test/unit/evaluate.test.ts` | Pattern matching, and the rule engine's allow/block/bypass paths for ref updates (including forced updates with a zero old value) and pushes. |
+| `test/unit/evaluate.test.ts` | Pattern matching (including `nocase`), and the rule engine's allow/block/bypass paths for ref updates (including forced updates with a zero old value and case-only variants with `core.ignorecase`) and pushes. |
+| `test/unit/hardening.test.ts` | The studio token comparison with non-ASCII input, CRLF-insensitive workflow comparison, `dependentProject` at a filesystem root, the `remote` name validation, and `remoteKey` for local paths, `file://` URLs and network URLs. |
 | `test/unit/walk.test.ts` | The pure core: review counting (latest state, write access, stale approvals), `judgeChain` (merge/squash/rebase-merged PRs, bypass pushes from the activity log, the bootstrap commit, rules that an unverified commit can't relax or delete), `finalRules`, and `planRemediation` (reset only when the whole tail is bad, report otherwise, report mode, already-reported violations). |
 | `test/unit/guard.test.ts` | With a fake GitHub API: event checks, remediation (GraphQL compare-and-swap payload, refused swap, fallback without `updateRefs`, rescue failure blocks the reset, report mode), `guardBranch` (two quick pushes both reset, reviewed merge on top gives a report with revert steps, read-only approvers ignored and permissions cached, stop at the marker, forged markers ignored, no duplicate issues), deletion restore through the activity API and its fallback, the PR status, the poison pill (ignore cases, inherited/caused/unknown, same-workflow matching, rebase-merge landed range, revert instructions), and `ci-guard` wiring with a stubbed `fetch` (`workflow_run` from a PR makes no API call, push runs the walk, the sweep, fork PRs). Round-3 cases: a direct push deleting the config (C1) and re-adding a relaxed one, a sweep over a commit that unprotects `main` (C2), per-branch markers (M2), uninitialised branches instead of automatic baselines (H1, M1), the bootstrap push, bypass pushes found in the activity log (H2), issue-before-marker and Issues disabled (M3), a violation reported by another run meanwhile (M6), the PR-link retry (M5), poison-pill dedupe (M4), `updateRefAtomic` error classification, the explicit baseline, markers for new branches, and 403s from forks vs. the same repository. |
 | `test/unit/misc.test.ts` | Remote URL parsing, config parsing and defaults (including poison-pill validation), reference-transaction input parsing, and rendering of the shim, the workflow (with and without the `workflow_run` trigger) and block messages. |
-| `test/integration/hooks.test.ts` | Real git repositories in a temp dir (bare origin + clones): commits, `--no-verify`, merges, resets, `git branch -f` / `update-ref`, pushes by remote name and by URL, bypass, chaining, self-repair, and crashes following `failMode`. |
+| `test/integration/hooks.test.ts` | Real git repositories in a temp dir (bare origin + clones): commits, `--no-verify`, merges, resets, `git branch -f` / `update-ref`, pushes by remote name, by URL, by relative path, by `file://` URL and from a subdirectory, bypass, chaining, self-repair, crashes following `failMode`, and tampering: a working-tree config naming another remote or broken JSON (the remote's rules still apply), unreadable rules following the shim's `failMode`, a case-only branch name on case-insensitive filesystems, and `update-ref --stdin` moving the remote-tracking ref and the branch together. |
 | `test/unit/studio.test.ts` | Output capture (restored after a throw), the page (token only inside the nonce'd script, no inline handlers), and one-action-at-a-time (409). |
 | `test/integration/studio.test.ts` | The built CLI's `studio --no-open` against a temp repository over raw HTTP: token, Host and Origin checks, 415/413/404, no CORS; state of a repository without rules; `init`, `protect` (file only) with the CLI's messages; settings validated by the schema and the workflow regenerated; `repairHooks` after deleting a hook; the global template; outside a repository; Ctrl+C exits 0; invalid `--port`. |
-| `test/integration/postinstall.test.ts` | The automatic setup: package laid out under `node_modules` of a temp repository; hooks installed and pointing there, `failMode` from the config, chaining, subdirectories, `--prefix` from another repository, transitive vs. direct and npm/yarn/pnpm workspace dependencies, the npx and dlx caches, husky-style and tracked `core.hooksPath`, the skip conditions, non-git directories, the package's own repository, missing `dist/`, and global mode (`init.templateDir` set, idempotent, foreign template left alone). |
+| `test/integration/postinstall.test.ts` | The automatic setup: package laid out under `node_modules` of a temp repository; hooks installed and pointing there, `failMode` from the config, chaining, subdirectories, `--prefix` from another repository, transitive vs. direct and npm/yarn/pnpm workspace dependencies, the npx and dlx caches, husky-style and tracked `core.hooksPath`, the skip conditions, non-git directories, the package's own repository, missing `dist/`, and global mode (`init.templateDir` set with a notice, idempotent, `VCS_PROTECTION_SKIP_GLOBAL`, our template written with `~` recognised, foreign template left alone). |
 
 Integration tests isolate git with `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM` and a temporary `HOME`, and clear `CI`, the npm variables and tokens, so they behave the same locally and in CI.
 

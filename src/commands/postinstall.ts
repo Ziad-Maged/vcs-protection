@@ -11,6 +11,8 @@ import { c, info, warn } from '../ui.js';
 import { installGlobalTemplate } from './install.js';
 
 export const SKIP_INSTALL_ENV = 'VCS_PROTECTION_SKIP_INSTALL';
+/** Skips only the global part (init.templateDir) of `npm i -g`. */
+export const SKIP_GLOBAL_ENV = 'VCS_PROTECTION_SKIP_GLOBAL';
 
 const truthy = (v: string | undefined) => !!v && !['0', 'false', ''].includes(v.trim().toLowerCase());
 
@@ -30,9 +32,16 @@ function gitTooOld(): boolean {
 }
 
 function setupGlobal(): void {
+  if (truthy(process.env[SKIP_GLOBAL_ENV])) {
+    info(c.dim(`vcs-protection: ${SKIP_GLOBAL_ENV} is set; git's init.templateDir was not changed.`));
+    return;
+  }
   const res = installGlobalTemplate(false);
   if (res.state === 'installed') {
     info(`${c.green('✔')} vcs-protection: new clones will get the git hooks automatically (init.templateDir=${res.dir}).`);
+    info(`  This changed your global git config (git config --global init.templateDir), which applies to every new`);
+    info(`  clone on this machine. The hooks stay inactive in repositories without ${CONFIG_FILE}.`);
+    info(c.dim(`  Undo: vcs-protection uninstall --global. Skip this step next time: ${SKIP_GLOBAL_ENV}=1.`));
   } else {
     info(`vcs-protection: git's init.templateDir is already set to '${res.current}'; left it unchanged.`);
     info(c.dim('  Run `vcs-protection install --global --force` to replace it, or `vcs-protection init` per clone.'));
@@ -43,7 +52,10 @@ function setupGlobal(): void {
 export function dependentProject(pkg: string): string | null {
   const parts = pkg.split(path.sep);
   const i = parts.indexOf('node_modules');
-  return i > 0 ? parts.slice(0, i).join(path.sep) || path.sep : null;
+  if (i <= 0) return null;
+  // `C:\node_modules\x` or `/node_modules/x`: the project is the filesystem root (`C:\`, not `C:`).
+  if (i === 1) return path.parse(pkg).root || path.sep;
+  return parts.slice(0, i).join(path.sep);
 }
 
 const readJson = (file: string): Record<string, unknown> | null => {

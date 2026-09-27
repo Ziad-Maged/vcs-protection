@@ -9,6 +9,11 @@ export function globalTemplateDir(): string {
   return path.join(os.homedir(), '.vcs-protection', 'git-template');
 }
 
+/** git's global init.templateDir, with `~` expanded as git itself does, or null when unset. */
+export function currentTemplateDir(): string | null {
+  return gitMaybe(['config', '--global', '--type=path', 'init.templateDir']);
+}
+
 export type GlobalTemplateResult = { state: 'installed'; dir: string } | { state: 'conflict'; current: string };
 
 /**
@@ -18,7 +23,7 @@ export type GlobalTemplateResult = { state: 'installed'; dir: string } | { state
  */
 export function installGlobalTemplate(force = false): GlobalTemplateResult {
   const ours = globalTemplateDir();
-  const current = gitMaybe(['config', '--global', 'init.templateDir']);
+  const current = currentTemplateDir();
   if (current && path.resolve(current) !== path.resolve(ours) && !force) return { state: 'conflict', current };
   mkdirSync(ours, { recursive: true });
   installHooksInDir(path.join(ours, 'hooks'), 'open');
@@ -38,7 +43,7 @@ export function installGlobal(opts: { force?: boolean }): void {
 export function uninstall(opts: { global?: boolean }): void {
   if (opts.global) {
     const ours = globalTemplateDir();
-    const current = gitMaybe(['config', '--global', 'init.templateDir']);
+    const current = currentTemplateDir();
     if (current && path.resolve(current) === path.resolve(ours)) {
       git(['config', '--global', '--unset', 'init.templateDir']);
     }

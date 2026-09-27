@@ -9,7 +9,7 @@ import { gitVersion, hooksDir, requireRepoRoot } from '../git/repo.js';
 import { hookStatus, installHooks } from '../hooks/install.js';
 import { VERSION } from '../version.js';
 import { c, info } from '../ui.js';
-import { requireEffectiveConfig, workingConfig } from './shared.js';
+import { requireEffectiveConfig, sameText, workingConfig } from './shared.js';
 
 export function list(opts: { json?: boolean }): void {
   const loaded = requireEffectiveConfig();
@@ -81,7 +81,7 @@ export function doctorChecks(): Check[] {
     const current = readFileSync(wf, 'utf8');
     const pinned = current.match(/vcs-protection@([^\s]+)/)?.[1] ?? VERSION;
     // Compare with what `github setup` would write now: it renders the working-tree config.
-    const inSync = current === renderWorkflow(workingConfig(), pinned);
+    const inSync = sameText(current, renderWorkflow(workingConfig(), pinned));
     checks.push({
       name: 'GitHub guard',
       ok: inSync,

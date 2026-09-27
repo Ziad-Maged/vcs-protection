@@ -1,17 +1,20 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { recordBypass } from '../audit/log.js';
 import { loadConfig } from '../config/load.js';
 import type { Config } from '../config/schema.js';
 import {
   currentBranch,
   gitPath,
+  ignoresCase,
   inProgressOperation,
   isAncestor,
   isSha,
   isZeroSha,
   localBranchesContaining,
   remoteDefaultRef,
-  remoteUrl,
+  remoteUrls,
   resolveRef,
 } from '../git/repo.js';
 import { parseGitHubRemote } from '../github/remote.js';
@@ -40,8 +43,11 @@ export function parseRefUpdates(input: string): RefUpdate[] {
     });
 }
 
-/** Repo facts for the rule engine that also see refs updated earlier in the same transaction. */
-export function liveFacts(pending: Map<string, string>): RepoFacts {
+/**
+ * Repo facts for the rule engine that also see refs updated earlier in the same transaction.
+ * `pending` should only hold remote-tracking values the caller trusts (see handleReferenceTransaction).
+ */
+export function liveFacts(pending: Map<string, string>, ignoreCase = false): RepoFacts {
   const tipOf = (ref: string) => pending.get(ref) ?? resolveRef(ref);
   const contains = (tip: string | null | undefined, sha: string) =>
     !!tip && !isZeroSha(tip) && (tip === sha || isAncestor(sha, tip));
@@ -54,23 +60,54 @@ export function liveFacts(pending: Map<string, string>): RepoFacts {
     isAncestor: (a, d) => isAncestor(a, d),
     // The hook runs while the transaction holds its locks; reading the ref still gives the old value.
     currentSha: (ref) => resolveRef(ref),
+    ignoreCase,
   };
 }
 
-/** Normalise a remote URL for comparison: GitHub URLs by owner/repo, others by trimmed text. */
-function remoteKey(url: string): string {
+const caseInsensitiveFs = process.platform === 'win32' || process.platform === 'darwin';
+
+/** A local path (or file:// URL) as an absolute, canonical path; null for network URLs. */
+function localPath(url: string): string | null {
+  let p = url.trim();
+  if (/^file:\/\//i.test(p)) {
+    try {
+      p = fileURLToPath(p);
+    } catch {
+      p = p.replace(/^file:\/\//i, '');
+    }
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(p) || (/^[^/\\]+:/.test(p) && !/^[A-Za-z]:[\\/]/.test(p))) {
+    return null; // https://, ssh://, or scp-like host:path (but not a Windows drive letter)
+  }
+  const abs = path.resolve(p);
+  try {
+    return realpathSync.native(abs);
+  } catch {
+    return abs;
+  }
+}
+
+/**
+ * Normalise a remote URL for comparison: GitHub URLs by owner/repo, local paths by their
+ * canonical location, others by trimmed text.
+ */
+export function remoteKey(url: string): string {
   const gh = parseGitHubRemote(url);
   if (gh) return `${gh.host}/${gh.owner}/${gh.repo}`.toLowerCase();
+  const local = localPath(url);
+  if (local !== null) {
+    const key = local.replace(/[\\/]+$/, '').replace(/[\\/]\.git$/, '').replace(/\.git$/, '');
+    return caseInsensitiveFs ? key.toLowerCase() : key;
+  }
   return url.trim().replace(/\.git\/?$/, '').replace(/\/$/, '');
 }
 
 /** Whether a push (pre-push arguments: remote name or URL, then URL) targets the shared remote. */
 export function pushTargetsShared(remoteName: string, url: string | undefined, config: Config): boolean {
   if (remoteName === config.remote) return true;
-  const shared = remoteUrl(config.remote);
-  if (!shared) return false;
-  const target = url || remoteName;
-  return remoteKey(target) === remoteKey(shared);
+  const shared = remoteUrls(config.remote);
+  if (shared.length === 0) return false;
+  const target = remoteKey(url || remoteName);
+  return shared.some((u) => remoteKey(u) === target);
 }
 
 function mergeHeadSha(): string | null {
@@ -129,12 +166,18 @@ function report(decision: Exclude<Decision, { action: 'allow' }>, config: Config
 export function handleReferenceTransaction(args: string[], input: string, config: Config): HookExit {
   if (args[0] !== 'prepared') return 0;
   const updates = parseRefUpdates(input);
-  const pending = new Map(updates.map((u) => [u.ref, u.newSha]));
-  const facts = liveFacts(pending);
+  // Remote-tracking refs moved in this same transaction count only when it also *creates* the
+  // local branch (a clone or a first checkout). Otherwise `update-ref --stdin` could move
+  // origin/main and main together to a local-only commit and look like a sync.
+  const pending = new Map(updates.filter((u) => u.ref.startsWith('refs/remotes/')).map((u) => [u.ref, u.newSha]));
+  const ignoreCase = ignoresCase();
+  const trusting = liveFacts(pending, ignoreCase);
+  const onDisk = liveFacts(new Map(), ignoreCase);
   const bypass = { reason: bypassReason() };
   let exit: HookExit = 0;
   for (const update of updates) {
-    const d = evaluateRefUpdate(update, config, facts, bypass);
+    const creating = isZeroSha(update.oldSha) && resolveRef(update.ref) === null;
+    const d = evaluateRefUpdate(update, config, creating ? trusting : onDisk, bypass);
     if (d.action !== 'allow' && report(d, config, 'reference-transaction') === 1) exit = 1;
   }
   return exit;
@@ -177,7 +220,7 @@ export function handlePrePush(args: string[], input: string, config: Config): Ho
 export function handlePreCommitLike(hook: 'pre-commit' | 'pre-merge-commit', config: Config): HookExit {
   const branch = currentBranch();
   if (!branch) return 0;
-  const rule = ruleFor(config, branch);
+  const rule = ruleFor(config, branch, { nocase: ignoresCase() });
   if (!rule) return 0;
   if (config.bypass.allowed && bypassReason()?.trim()) return 0;
   // Committing on a protected branch while resolving a rebase/cherry-pick onto commits that are
@@ -210,7 +253,8 @@ export function handleSelfCheck(config: Config): HookExit {
 export function runHook(hook: HookName, args: string[], input: string): HookExit {
   let config: Config | null = null;
   try {
-    const loaded = loadConfig();
+    // The shim passes the remote the rules came from at install time; the working tree can't redirect it.
+    const loaded = loadConfig(undefined, { remote: process.env.VCSP_REMOTE });
     if (!loaded) return 0;
     config = loaded.config;
     switch (hook) {
@@ -226,7 +270,8 @@ export function runHook(hook: HookName, args: string[], input: string): HookExit
         return handleSelfCheck(config);
     }
   } catch (err) {
-    const failClosed = config?.failMode === 'closed';
+    // Rules that couldn't be loaded fall back to the shim's failMode (from the rules at install time).
+    const failClosed = (config?.failMode ?? process.env.VCSP_FAIL) === 'closed';
     warn(`Internal error in ${hook} hook: ${(err as Error).message}`);
     warn(failClosed ? 'failMode is "closed": blocking the operation.' : 'failMode is "open": allowing the operation.');
     return failClosed ? 1 : 0;

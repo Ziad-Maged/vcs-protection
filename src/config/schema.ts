@@ -52,6 +52,9 @@ const refPrefix = z
     { message: 'must be usable as the start of a git branch name (no spaces, "..", "//", ~^:?*[\\, or leading "-", "/", ".")' },
   );
 
+/** Remote names vcs-protection accepts: safe in shell scripts and never mistaken for a git option. */
+export const REMOTE_NAME_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
+
 /** Five-field cron expression, as GitHub Actions `schedule` expects. */
 const cron = z.string().regex(/^\S+(\s+\S+){4}$/, 'must be a 5-field cron expression, e.g. "*/30 * * * *"');
 
@@ -69,7 +72,10 @@ export const configSchema = z.object({
   $schema: z.string().optional(),
   version: z.literal(1),
   /** Remote that represents the team's shared repository. */
-  remote: z.string().min(1).default('origin'),
+  remote: z
+    .string()
+    .regex(REMOTE_NAME_RE, 'must be a plain remote name (letters, digits, ".", "_", "-"; not starting with "-")')
+    .default('origin'),
   protected: z.array(branchRuleSchema).default([]),
   bypass: z
     .object({
