@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../config/load.js';
-import { CONFIG_FILE, type Config } from '../config/schema.js';
+import { CONFIG_FILE, parseConfig, type Config } from '../config/schema.js';
 import { compareUrl, parseGitHubRemote } from '../github/remote.js';
 import { WORKFLOW_PATH } from '../github/workflow.js';
 import { git } from '../git/exec.js';
@@ -47,7 +47,7 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
 }
 
-async function shareChange(config: Config, summary: string, opts: RuleChangeOptions): Promise<void> {
+export async function shareChange(config: Config, summary: string, opts: RuleChangeOptions): Promise<void> {
   const root = requireRepoRoot();
   const files = [CONFIG_FILE, ...(existsSync(path.join(root, WORKFLOW_PATH)) ? [WORKFLOW_PATH] : [])];
 
@@ -124,4 +124,36 @@ export async function unprotect(pattern: string, opts: RuleChangeOptions): Promi
   info(`${c.green('✔')} '${pattern}' removed from protected branches.`);
   info(c.dim('  It stays protected for everyone until this change is merged into the default branch.'));
   await shareChange(next, `unprotect ${pattern}`, opts);
+}
+
+/** A partial change to the settings outside `protected` (what the studio's settings form edits). */
+export interface SettingsPatch {
+  github?: Partial<Omit<Config['github'], 'poisonPill'>> & { poisonPill?: Partial<Config['github']['poisonPill']> };
+  bypass?: Partial<Config['bypass']>;
+  failMode?: Config['failMode'];
+}
+
+/**
+ * Change guard/bypass/failMode settings in the working-tree config, validate the result with the
+ * schema, regenerate the workflow, and share the change through a PR like `protect` does.
+ */
+export async function updateSettings(patch: SettingsPatch, opts: RuleChangeOptions): Promise<void> {
+  const { file, config } = requireLocalConfig();
+  const merged = {
+    ...config,
+    ...(patch.failMode ? { failMode: patch.failMode } : {}),
+    bypass: { ...config.bypass, ...patch.bypass },
+    github: {
+      ...config.github,
+      ...patch.github,
+      poisonPill: { ...config.github.poisonPill, ...patch.github?.poisonPill },
+    },
+  };
+  // Throws with the list of invalid fields, exactly like a hand-edited file would.
+  const next = parseConfig(JSON.stringify(merged), CONFIG_FILE);
+  writeConfig(file, next);
+  afterEdit(next);
+  info(`${c.green('✔')} Settings updated in ${CONFIG_FILE}.`);
+  info(c.dim('  They take effect for everyone once this change is merged into the default branch.'));
+  await shareChange(next, 'update settings', opts);
 }

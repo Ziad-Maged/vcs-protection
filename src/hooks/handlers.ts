@@ -11,8 +11,10 @@ import {
   isZeroSha,
   localBranchesContaining,
   remoteDefaultRef,
+  remoteUrl,
   resolveRef,
 } from '../git/repo.js';
+import { parseGitHubRemote } from '../github/remote.js';
 import { gitOk } from '../git/exec.js';
 import { blockMessage, type MessageContext } from '../messages.js';
 import { branchName, ruleFor } from '../rules/match.js';
@@ -50,7 +52,25 @@ export function liveFacts(pending: Map<string, string>): RepoFacts {
       return !!ref && contains(tipOf(ref), sha);
     },
     isAncestor: (a, d) => isAncestor(a, d),
+    // The hook runs while the transaction holds its locks; reading the ref still gives the old value.
+    currentSha: (ref) => resolveRef(ref),
   };
+}
+
+/** Normalise a remote URL for comparison: GitHub URLs by owner/repo, others by trimmed text. */
+function remoteKey(url: string): string {
+  const gh = parseGitHubRemote(url);
+  if (gh) return `${gh.host}/${gh.owner}/${gh.repo}`.toLowerCase();
+  return url.trim().replace(/\.git\/?$/, '').replace(/\/$/, '');
+}
+
+/** Whether a push (pre-push arguments: remote name or URL, then URL) targets the shared remote. */
+export function pushTargetsShared(remoteName: string, url: string | undefined, config: Config): boolean {
+  if (remoteName === config.remote) return true;
+  const shared = remoteUrl(config.remote);
+  if (!shared) return false;
+  const target = url || remoteName;
+  return remoteKey(target) === remoteKey(shared);
 }
 
 function mergeHeadSha(): string | null {
@@ -98,6 +118,7 @@ function report(decision: Exclude<Decision, { action: 'allow' }>, config: Config
     op,
     sourceBranch,
     bypassAllowed: config.bypass.allowed,
+    remote: config.remote,
     worktreeMovedTo,
   };
   const msg = blockMessage(ctx);
@@ -120,13 +141,13 @@ export function handleReferenceTransaction(args: string[], input: string, config
 }
 
 export function handlePrePush(args: string[], input: string, config: Config): HookExit {
-  const remoteName = args[0] ?? '';
+  const targetsShared = pushTargetsShared(args[0] ?? '', args[1], config);
   const bypass = { reason: bypassReason() };
   let exit: HookExit = 0;
   for (const line of input.split('\n').map((l) => l.trim()).filter(Boolean)) {
     const [localRef, localSha, remoteRef, remoteSha] = line.split(/\s+/);
     if (!localRef || !localSha || !remoteRef || !remoteSha) continue;
-    const d = evaluatePush({ localRef, localSha, remoteRef, remoteSha }, remoteName, config, bypass);
+    const d = evaluatePush({ localRef, localSha, remoteRef, remoteSha }, targetsShared, config, bypass);
     if (d.action === 'allow') continue;
     if (d.action === 'bypass') {
       report(d, config, 'pre-push');
@@ -141,6 +162,7 @@ export function handlePrePush(args: string[], input: string, config: Config): Ho
       op: null,
       sourceBranch: source,
       bypassAllowed: config.bypass.allowed,
+      remote: config.remote,
     });
     blockBox(msg.title, msg.lines);
     exit = 1;
@@ -169,6 +191,7 @@ export function handlePreCommitLike(hook: 'pre-commit' | 'pre-merge-commit', con
     op: inProgressOperation(),
     sourceBranch: merge ? (localBranchesContaining(merge, branch)[0] ?? null) : null,
     bypassAllowed: config.bypass.allowed,
+    remote: config.remote,
   });
   blockBox(msg.title, msg.lines);
   return 1;
@@ -176,9 +199,9 @@ export function handlePreCommitLike(hook: 'pre-commit' | 'pre-merge-commit', con
 
 /** post-checkout / post-merge: re-install shims that went missing or stale. Never blocks. */
 export function handleSelfCheck(config: Config): HookExit {
-  const broken = hookStatus(config.failMode).filter((h) => h.state === 'missing' || h.state === 'outdated');
+  const broken = hookStatus(config.failMode, undefined, config.remote).filter((h) => h.state === 'missing' || h.state === 'outdated');
   if (broken.length > 0) {
-    installHooks(config.failMode, undefined, broken.map((b) => b.hook));
+    installHooks(config.failMode, undefined, broken.map((b) => b.hook), config.remote);
     warn(`Repaired git hooks: ${broken.map((b) => b.hook).join(', ')}`);
   }
   return 0;

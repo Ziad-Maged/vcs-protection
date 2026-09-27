@@ -37,6 +37,34 @@ export const poisonPillSchema = z
     }
   });
 
+/** A prefix that yields valid git branch names (see git-check-ref-format). */
+const refPrefix = z
+  .string()
+  .min(1)
+  .refine(
+    (p) =>
+      !/[\s~^:?*[\\\x00-\x1f\x7f]/.test(p) &&
+      !p.includes('..') &&
+      !p.includes('//') &&
+      !p.includes('@{') &&
+      !/^[-/.]/.test(p) &&
+      !p.split('/').some((seg) => seg.startsWith('.') || seg.endsWith('.lock')),
+    { message: 'must be usable as the start of a git branch name (no spaces, "..", "//", ~^:?*[\\, or leading "-", "/", ".")' },
+  );
+
+/** Five-field cron expression, as GitHub Actions `schedule` expects. */
+const cron = z.string().regex(/^\S+(\s+\S+){4}$/, 'must be a 5-field cron expression, e.g. "*/30 * * * *"');
+
+const GITHUB_DEFAULTS = {
+  enforcement: 'revert' as const,
+  rescueBranchPrefix: 'vcs-protection/rescue/',
+  bypassUsers: [] as string[],
+  dismissStaleApprovals: false,
+  sweep: '*/30 * * * *' as string | null,
+  guardLogin: 'github-actions[bot]',
+  poisonPill: POISON_PILL_DEFAULTS,
+};
+
 export const configSchema = z.object({
   $schema: z.string().optional(),
   version: z.literal(1),
@@ -53,18 +81,22 @@ export const configSchema = z.object({
     .object({
       /** What the Actions guard does on a violation: revert it, or only report it in an issue. */
       enforcement: z.enum(['revert', 'report']).default('revert'),
-      rescueBranchPrefix: z.string().min(1).default('vcs-protection/rescue/'),
+      rescueBranchPrefix: refPrefix.default('vcs-protection/rescue/'),
       /** GitHub logins whose direct pushes the Actions guard allows (e.g. release managers). */
       bypassUsers: z.array(z.string()).default([]),
+      /** Only count approvals given on the PR's final head commit (GitHub's "dismiss stale approvals"). */
+      dismissStaleApprovals: z.boolean().default(false),
+      /** Schedule of the guard's sweep over all protected branches (catches `[skip ci]` pushes); null: off. */
+      sweep: cron.nullable().default('*/30 * * * *'),
+      /** Account whose `vcs-protection/accepted` statuses the guard trusts (the workflow's token). */
+      guardLogin: z
+        .string()
+        .regex(/\[bot\]$/, 'must be a bot account (ending in "[bot]"), which personal tokens cannot post as')
+        .default('github-actions[bot]'),
       /** Post-merge check: revert commits that break critical CI workflows. */
       poisonPill: poisonPillSchema.default(POISON_PILL_DEFAULTS),
     })
-    .default({
-      enforcement: 'revert',
-      rescueBranchPrefix: 'vcs-protection/rescue/',
-      bypassUsers: [],
-      poisonPill: POISON_PILL_DEFAULTS,
-    }),
+    .default(GITHUB_DEFAULTS),
   /** What hooks do if the CLI itself fails: `open` warns and allows, `closed` blocks. */
   failMode: z.enum(['open', 'closed']).default('open'),
 });

@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { readStdin } from './hooks/context.js';
 import { runHook } from './hooks/handlers.js';
-import { HOOKS, type HookName } from './hooks/shim.js';
+import { BLOCK_EXIT, HOOKS, type HookName } from './hooks/shim.js';
 import { error } from './ui.js';
 import { VERSION } from './version.js';
 
@@ -80,6 +80,13 @@ program
   .action(action(async (opts) => (await import('./commands/github.js')).audit(opts)));
 
 program
+  .command('studio')
+  .description('open a web UI to manage protection here (runs on 127.0.0.1 until Ctrl+C)')
+  .option('-p, --port <n>', 'port to listen on (default: a free one)')
+  .option('--no-open', 'print the link instead of opening the browser')
+  .action(action(async (opts) => (await import('./commands/studio.js')).studio(opts)));
+
+program
   .command('install')
   .description('install hooks for every future clone via git init.templateDir')
   .requiredOption('--global', 'install into the global git template')
@@ -100,7 +107,7 @@ program
       if (!(HOOKS as readonly string[]).includes(name)) throw new Error(`Unknown hook '${name}'.`);
       const hook = name as HookName;
       const input = STDIN_HOOKS.has(hook) ? await readStdin() : '';
-      return runHook(hook, args, input);
+      return runHook(hook, args, input) === 1 ? BLOCK_EXIT : 0;
     }),
   );
 

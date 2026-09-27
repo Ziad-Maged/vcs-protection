@@ -7,7 +7,7 @@ It works on two layers:
 | Layer | What it does | Can it be bypassed? |
 |---|---|---|
 | **Local git hooks** (every teammate's clone) | Blocks commits, merges, resets, rebases and pushes that would change a protected branch, and **`git commit --no-verify` too** | Only by uninstalling the hooks or using the logged emergency bypass |
-| **GitHub Actions guard** (on the remote) | Checks every push to a protected branch. Anything that isn't the merge of a PR with enough approvals is **reverted**: the commits are saved to a rescue branch and an issue is opened | Only by a push that also removes the workflow (see [Limitations](#limitations)) |
+| **GitHub Actions guard** (on the remote) | Checks every push to a protected branch, plus a sweep every 30 minutes. Anything that isn't the merge of a PR approved by people with write access is **reverted**: the commits are saved to a rescue branch and an issue is opened | Only by deliberately removing the workflow from the default branch, or forging its markers (see [Limitations](#limitations)) |
 
 ## How `--no-verify` is blocked
 
@@ -45,6 +45,8 @@ VCS_PROTECTION_BYPASS="initial setup" git push
 ```
 
 On GitHub, check that **Settings → Actions → General → Workflow permissions** is set to **Read and write permissions**. The guard needs it to revert pushes and open issues.
+
+**Starting the guard.** The guard only trusts commits it has verified itself. The push that first adds `.vcs-protection.json` to a branch is taken as the starting point automatically. In every other case — adding the guard to a repository whose rules were committed earlier, upgrading from an older version of vcs-protection, or a protected branch the guard has never seen — run it once by hand: **Actions → vcs-protection guard → Run workflow**, tick **baseline**. That marks the current tip of every protected branch as verified. Until then, guard runs are red with `No verified commit on '<branch>' … run the guard once with baseline`, and accept nothing.
 
 ### Every teammate: automatic on `npm install`
 
@@ -84,8 +86,34 @@ The hooks do nothing in repositories that have no `.vcs-protection.json`.
 | `github setup [--pin <version>]` | (Re)generate the Actions guard workflow |
 | `audit [--since <date>] [--limit <n>]` | List local bypasses, and protected-branch commits that didn't come from an approved PR |
 | `install --global` / `uninstall [--global]` | Manage hooks for all future clones, or remove them from this clone |
+| `studio [--port <n>] [--no-open]` | Open a web UI for all of the above (see [Studio](#studio)) |
 
 GitHub API access (for `audit` and automatic PR creation) uses `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`.
+
+## Studio
+
+Prefer clicking to typing? Run this inside a repository:
+
+```sh
+vcs-protection studio          # or: npx vcs-protection studio
+```
+
+It starts a small web app on your computer and opens it in the browser. Everything the commands above do is there:
+
+| Section | What you can do |
+|---|---|
+| **Overview** | See the rules' source (shared or only in this clone), hook health, the guard's state and local bypasses. Run the `doctor` checks and fix broken hooks with one click. In a repository without rules: set up protection (`init`). |
+| **Rules** | See, add, edit and remove protected patterns. Choose how to share the change: open a pull request (default), commit on a branch only, or only edit the file. |
+| **Guard settings** | Edit enforcement, bypass users, stale approvals, the sweep schedule, the poison pill, the local bypass and `failMode`. Values are validated like the config file, and saved through a pull request. |
+| **Hooks** | Hook states, install/refresh, repair, uninstall. |
+| **GitHub guard** | Workflow status, write or regenerate the workflow (optionally pinned), and links to the Actions page (for example to run the baseline). |
+| **Audit** | Run the audit and read the result as a table; the local bypass log. |
+| **Machine** | Install or remove the hooks for every new clone (`install --global`). This is also the only section outside a git repository. |
+
+Every action shows the same messages the command would print, and changes still go through pull requests. Destructive actions (removing a rule, uninstalling hooks) ask first.
+
+- `--port <n>` picks the port (default: any free port); `--no-open` only prints the link (useful over SSH: forward the port first).
+- It listens on `127.0.0.1` only, and only answers the page it served: the link carries a one-time token, and requests from other websites are refused. Press **Ctrl+C** to stop it; a new link is printed every time it starts.
 
 ## Configuration: `.vcs-protection.json`
 
@@ -102,6 +130,9 @@ GitHub API access (for `audit` and automatic PR creation) uses `GITHUB_TOKEN`, t
     "enforcement": "revert",
     "rescueBranchPrefix": "vcs-protection/rescue/",
     "bypassUsers": [],
+    "dismissStaleApprovals": false,
+    "sweep": "*/30 * * * *",
+    "guardLogin": "github-actions[bot]",
     "poisonPill": { "enabled": false, "workflows": [], "checks": [], "conclusions": ["failure", "timed_out"] }
   },
   "failMode": "open"
@@ -109,24 +140,32 @@ GitHub API access (for `audit` and automatic PR creation) uses `GITHUB_TOKEN`, t
 ```
 
 - **`pattern`**: a branch name or glob. `release/*` matches `release/1.0` but not `release/1.0/x`; use `release/**` for any depth.
-- **`requiredApprovals`**: how many approvals a PR needs. Each reviewer's latest review counts, dismissed reviews don't count, and the PR author never counts. Outstanding "changes requested" also fails the check.
+- **`requiredApprovals`**: how many approvals a PR needs. Only reviewers with **write access** count (like GitHub's own protection). Each reviewer's latest review counts, dismissed reviews don't count, and the PR author never counts. Outstanding "changes requested" also fails the check.
 - **`bypass.allowed`**: whether `VCS_PROTECTION_BYPASS="<reason>"` works locally. Every use is appended to `.git/vcs-protection/audit.log`.
 - **`github.enforcement`**: `revert` resets the branch, saves the commits to a rescue branch and opens an issue. `report` only opens the issue.
+- **`github.rescueBranchPrefix`**: where rescued commits go; must be usable as the start of a git branch name.
 - **`github.bypassUsers`**: GitHub logins whose direct pushes the guard allows, such as release managers.
+- **`github.dismissStaleApprovals`**: when `true`, only approvals of the PR's final commit count; a new push after an approval needs a fresh one.
+- **`github.sweep`**: how often the guard re-checks every protected branch (cron); `null` turns the sweep off.
+- **`github.guardLogin`**: the bot account whose `vcs-protection/accepted/<branch>` statuses the guard trusts. `github setup` writes it into the workflow; the guard never reads it from a commit. Leave the default unless the guard runs with a GitHub App token.
 - **`github.poisonPill`**: revert approved merges that break critical CI workflows. See [Poison pill](#poison-pill).
 - **`failMode`**: what the hooks do if the CLI is missing or crashes. `open` warns and allows; `closed` blocks.
 
-**Rules protect themselves.** Hooks read the config from the remote default branch (`origin/HEAD`), not from your working tree. Editing the file on a feature branch changes nothing until that change is approved and merged. The guard judges each push by the config as it was *before* the push.
+**Rules protect themselves.** Hooks read the config from the remote default branch (`origin/HEAD`), not from your working tree. Editing the file on a feature branch changes nothing until that change is approved and merged. The GitHub guard only uses the rules in commits it has verified: an unreviewed commit that deletes the file, breaks it, or removes a branch from `protected` changes nothing, and is itself reverted.
 
 ## The GitHub guard
 
 The workflow runs `npx vcs-protection@<version> ci-guard`:
 
-- **Push to a protected branch:** the push is accepted only if its head commit is the merge commit of a PR into that branch with enough approvals. Force pushes, direct pushes, and PRs merged in the UI with too few approvals are reverted with a compare-and-swap check, so newer pushes are never overwritten.
+- **Every push, and a sweep every 30 minutes:** the guard judges the branch from its current tip back to the last commit it already verified **for that branch**. It marks verified commits with a `vcs-protection/accepted/<branch>` commit status (a commit verified on `develop` isn't thereby verified on `main`). A commit is fine if it is the merge, squash or rebase-merge of a PR into that branch with enough approvals, or was pushed by a `bypassUsers` login (the guard looks the pusher up in GitHub's activity log, so a release bot's `[skip ci]` push is kept). Because every run re-checks everything unverified, nothing slips through when a run is skipped (`[skip ci]` in a commit message), cancelled, or when a second push lands before the first is judged.
+- **Which rules count:** only those in the newest verified commit. They change only through verified commits, so an unreviewed commit can't switch protection off, not even by deleting `.vcs-protection.json`. The account whose markers count (`github-actions[bot]`) comes from the workflow, not from the commits.
+- **What happens to violations:** if every commit from the first violation up to the tip is a violation, the branch is moved back to before it; the commits are saved on a rescue branch first. If reviewed work was merged on top of it, nothing is thrown away: the issue lists the commits with the exact `git revert` commands. Force pushes are reset, and protected branches created from unreviewed commits are deleted.
+- **The move is atomic:** the branch is updated only if it still points at the commit the guard judged (GraphQL `updateRefs` with an expected value), so a merge that lands meanwhile is never overwritten. If the rescue branch can't be saved, nothing is reset. Runs for the same branch are queued one after another; the issue is written before a commit is marked as reported, so a failure never hides a violation, and overlapping runs don't open the same issue twice.
+- **Merges made in the GitHub UI:** if GitHub hasn't linked the merge commit to its PR yet, the guard waits and asks again (up to about 17 seconds) instead of treating it as a direct push.
 - **Pull requests into a protected branch:** the guard posts a `vcs-protection/approvals` commit status (for example "1/2 approvals: merging now will be reverted"), so reviewers can see this before they merge.
-- **Protected branch deleted:** the guard recreates it when GitHub sends the push event. Otherwise it opens an issue with restore instructions.
+- **Protected branch deleted:** the guard recreates it at the deleted commit, from GitHub's repository activity log. If that isn't available, it opens an issue with a restore command.
 
-"Reverted" means the guard force-resets the branch to the commit before the push, and only while the pushed commit is still the branch tip. This compare-and-swap check means a newer push is never overwritten; in that case the guard only saves the rescue branch and opens the issue.
+A branch the guard has never verified isn't judged until it has a starting point (see **Starting the guard** above); `vcs-protection audit` checks older history.
 
 ### Poison pill
 
@@ -142,14 +181,17 @@ An approved PR can still break the build. With the poison pill on, the guard als
 - **`checks`**: optional job (check-run) names that count. Empty means every job of the finished workflow.
 - **`conclusions`**: check-run results that count as a breach: `failure` and `timed_out` by default; `cancelled`, `action_required` and `startup_failure` are also allowed.
 
-The guard reads the results from GitHub's check-runs API, and only for runs triggered by a `push` (failing PR builds are ignored). It judges by the rules as they were before the commit. A check that already failed on the commit's parent is treated as inherited, so an innocent PR merged on top of a broken one is never rolled back. If newer commits already landed on top of the broken one, it does **not** reset the branch. Instead the issue lists the failing checks and gives the exact `git revert` command to undo it through a PR. `github.bypassUsers` doesn't apply to the poison pill. After changing the setting, run `vcs-protection github setup` on the same branch and merge the config and the regenerated workflow together through a PR.
+The guard reads the results from GitHub's check-runs API, and only for runs triggered by a `push` (failing PR builds are ignored). It judges by the rules as they were before the commit, and looks at the whole merge (all commits of a rebase merge). Each failing check is compared with the same check of the same workflow before the merge: if it failed there too, the failure is inherited and nothing happens; if it passed, the merge caused it and the branch may be reset; if that earlier run is missing, unfinished or cancelled, the guard only reports. So an innocent PR merged on top of a broken one isn't rolled back. If newer commits already landed on top of the broken one, it does **not** reset the branch. Instead the issue lists the failing checks and gives the exact `git revert` command to undo it through a PR. `github.bypassUsers` doesn't apply to the poison pill. After changing the setting, run `vcs-protection github setup` on the same branch and merge the config and the regenerated workflow together through a PR.
 
 ## Limitations
 
 These are guardrails, not a security boundary. Real enforcement needs GitHub's server-side protection: rulesets or branch protection on a plan that includes them for private repos.
 
 - Anyone can remove local hooks (`rm .git/hooks/*`, `vcs-protection uninstall`). `doctor`, the self-repair on checkout/merge, and the GitHub guard reduce the impact.
-- GitHub runs the workflow file **from the pushed commit**, so a direct push that also deletes or edits the guard workflow is not checked. `vcs-protection audit` finds these afterwards.
+- A push run uses the workflow file **from the pushed commit**, so a direct push that also deletes or edits the guard isn't checked by its own run. The sweep runs from the default branch's copy and catches it within 30 minutes, unless the guard was removed from the default branch too. `[skip ci]` pushes are likewise caught by the next run or the sweep, not instantly.
+- The accepted marker trusts statuses from `github-actions[bot]`. A personal token can't post those, but a workflow someone adds on a branch can: deliberate sabotage is possible. `vcs-protection audit` ignores markers.
+- The poison pill reports each broken commit once; re-running its CI doesn't open another issue.
+- If a reviewed PR is merged on top of an unreviewed commit, the guard reports the commit (with `git revert` steps) instead of resetting.
 - A PR merged without enough approvals shows as "merged" on GitHub and is then reverted. The issue and rescue branch explain what happened and how to redo it properly.
 - A blocked fast-forward merge or `reset --hard` leaves your files already updated, because git changes them before the branch. The block message prints the exact `git read-tree -m -u <sha> HEAD` command to put them back.
 

@@ -15,6 +15,7 @@ const facts: RepoFacts = {
   onRemoteBranch: (sha, remote, branch) => remote === 'origin' && branch === 'main' && sha === A,
   onRemoteDefault: (sha) => sha === A,
   isAncestor: (a, d) => a === d || (a === A && d === B),
+  currentSha: (ref) => (ref === 'refs/heads/main' ? A : null),
 };
 
 const upd = (oldSha: string, newSha: string, ref = 'refs/heads/main') => ({ oldSha, newSha, ref });
@@ -63,6 +64,19 @@ describe('evaluateRefUpdate', () => {
     });
   });
 
+  it('judges a forced update of an existing branch (zero old value) as a move, not a creation', () => {
+    // `git branch -f release/1 origin/main` while release/1 exists at C, which isn't on the remote.
+    const withRelease: RepoFacts = { ...facts, currentSha: (ref) => (ref === 'refs/heads/release/1' ? C : null) };
+    expect(evaluateRefUpdate(upd(Z, A, 'refs/heads/release/1'), config, withRelease)).toMatchObject({
+      action: 'block',
+      kind: 'rewrite',
+    });
+    // `git update-ref refs/heads/main <local commit>`: an advance, reported as such.
+    expect(evaluateRefUpdate(upd(Z, B), config, facts)).toMatchObject({ action: 'block', kind: 'advance' });
+    // Syncing with a forced update is still fine.
+    expect(evaluateRefUpdate(upd(Z, A), config, facts).action).toBe('allow');
+  });
+
   it('turns a block into a bypass when a reason is given and bypass is allowed', () => {
     expect(evaluateRefUpdate(upd(A, B), config, facts, { reason: 'hotfix' })).toMatchObject({
       action: 'bypass',
@@ -83,19 +97,19 @@ describe('evaluatePush', () => {
   });
 
   it('blocks pushing to a protected branch on the configured remote', () => {
-    expect(evaluatePush(push('refs/heads/main', B, A), 'origin', config)).toMatchObject({ action: 'block', kind: 'push' });
+    expect(evaluatePush(push('refs/heads/main', B, A), true, config)).toMatchObject({ action: 'block', kind: 'push' });
   });
 
   it('blocks deleting a protected branch unless the rule allows it', () => {
-    expect(evaluatePush(push('refs/heads/main', Z, A), 'origin', config)).toMatchObject({ kind: 'push-delete' });
+    expect(evaluatePush(push('refs/heads/main', Z, A), true, config)).toMatchObject({ kind: 'push-delete' });
     const lax = defaultConfig(['main']);
     lax.protected[0]!.allowDeletion = true;
-    expect(evaluatePush(push('refs/heads/main', Z, A), 'origin', lax).action).toBe('allow');
+    expect(evaluatePush(push('refs/heads/main', Z, A), true, lax).action).toBe('allow');
   });
 
   it('allows feature branches, other remotes and no-op pushes', () => {
-    expect(evaluatePush(push('refs/heads/feature', B, A), 'origin', config).action).toBe('allow');
-    expect(evaluatePush(push('refs/heads/main', B, A), 'fork', config).action).toBe('allow');
-    expect(evaluatePush(push('refs/heads/main', A, A), 'origin', config).action).toBe('allow');
+    expect(evaluatePush(push('refs/heads/feature', B, A), true, config).action).toBe('allow');
+    expect(evaluatePush(push('refs/heads/main', B, A), false, config).action).toBe('allow');
+    expect(evaluatePush(push('refs/heads/main', A, A), true, config).action).toBe('allow');
   });
 });

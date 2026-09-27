@@ -15,6 +15,12 @@ export interface RepoFacts {
   onRemoteDefault(sha: string, remote: string): boolean;
   /** True if `ancestor` is an ancestor of (or equal to) `descendant`. */
   isAncestor(ancestor: string, descendant: string): boolean;
+  /**
+   * Current value of a ref before the transaction, or null if it doesn't exist. Needed because
+   * forced updates (`git branch -f`, `git update-ref` without an old value) report an all-zero
+   * old value even when the branch exists.
+   */
+  currentSha(ref: string): string | null;
 }
 
 export type BlockKind =
@@ -77,6 +83,12 @@ export function evaluateRefUpdate(
   }
 
   if (isZero(update.oldSha)) {
+    const existing = facts.currentSha(update.ref);
+    if (existing && !isZero(existing)) {
+      // A forced move of an existing branch, not a creation: judge it against its real old value.
+      if (existing === update.newSha) return { action: 'allow', reason: 'no change' };
+      return evaluateRefUpdate({ ...update, oldSha: existing }, config, facts, bypass);
+    }
     if (facts.onRemoteDefault(update.newSha, config.remote)) {
       return { action: 'allow', reason: 'created from the remote default branch' };
     }
@@ -94,15 +106,18 @@ export interface PushUpdate {
   remoteSha: string;
 }
 
-/** Decide whether one ref of a `git push` (from the pre-push hook) is allowed. */
+/**
+ * Decide whether one ref of a `git push` (from the pre-push hook) is allowed. `targetsShared`
+ * says whether the push goes to the shared repository (`config.remote`, by name or by URL).
+ */
 export function evaluatePush(
   push: PushUpdate,
-  remoteName: string,
+  targetsShared: boolean,
   config: Config,
   bypass: BypassInput = { reason: undefined },
 ): Decision {
   const update: RefUpdate = { oldSha: push.remoteSha, newSha: push.localSha, ref: push.remoteRef };
-  if (remoteName !== config.remote) return { action: 'allow', reason: `remote ${remoteName} is not ${config.remote}` };
+  if (!targetsShared) return { action: 'allow', reason: `not a push to ${config.remote}` };
   if (!push.remoteRef.startsWith('refs/heads/')) return { action: 'allow', reason: 'not a branch' };
   const branch = branchName(push.remoteRef);
   const rule = ruleFor(config, branch);

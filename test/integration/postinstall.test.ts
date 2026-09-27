@@ -49,11 +49,15 @@ function installPackageAt(dir: string): string {
   return path.join(dir, 'scripts/postinstall.mjs');
 }
 
-/** A git repository with the package installed under node_modules. Returns [repo, wrapper]. */
-function project(name: string): [string, string] {
+const manifest = (deps: Record<string, string>, extra: object = {}) =>
+  JSON.stringify({ name: 'app', version: '1.0.0', devDependencies: deps, ...extra });
+
+/** A git repository that depends on the package, installed under node_modules. Returns [repo, wrapper]. */
+function project(name: string, deps: Record<string, string> = { 'vcs-protection': '^1.0.0' }): [string, string] {
   const repo = path.join(tmp, name);
   mkdirSync(repo, { recursive: true });
   gitOk(repo, 'init', '-q', '-b', 'main');
+  writeFileSync(path.join(repo, 'package.json'), manifest(deps));
   return [repo, installPackageAt(path.join(repo, 'node_modules', 'vcs-protection'))];
 }
 
@@ -118,6 +122,67 @@ describe('postinstall: local (dependency) install', () => {
     const r = postinstall(wrapper, dir);
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain('not inside a git working tree');
+  });
+
+  it('installs into the repository that owns node_modules, not the one npm ran in (--prefix)', () => {
+    const [repo, wrapper] = project('prefix-target');
+    const [elsewhere] = project('prefix-invoker', {});
+    expect(postinstall(wrapper, elsewhere).code).toBe(0);
+    expect(managed(repo, 'pre-commit')).toBe(true);
+    expect(existsSync(hookFile(elsewhere, 'pre-commit'))).toBe(false);
+  });
+
+  it('skips transitive installs, but accepts workspace dependencies', () => {
+    const [transitive, w1] = project('transitive', { 'some-lib': '^1.0.0' });
+    expect(postinstall(w1, transitive).code).toBe(0);
+    expect(existsSync(hookFile(transitive, 'pre-commit'))).toBe(false);
+
+    const [mono, w2] = project('monorepo', {});
+    writeFileSync(path.join(mono, 'package.json'), manifest({}, { workspaces: ['packages/*'] }));
+    mkdirSync(path.join(mono, 'packages', 'api'), { recursive: true });
+    writeFileSync(path.join(mono, 'packages', 'api', 'package.json'), manifest({ 'vcs-protection': '^1.0.0' }));
+    expect(postinstall(w2, mono).code).toBe(0);
+    expect(managed(mono, 'pre-commit')).toBe(true);
+  });
+
+  it('accepts a dependency of a pnpm workspace package, and skips dlx caches', () => {
+    const [mono, wrapper] = project('pnpm-mono', {});
+    writeFileSync(path.join(mono, 'pnpm-workspace.yaml'), "packages:\n  - 'apps/*'\n  - '!apps/ignored'\n");
+    mkdirSync(path.join(mono, 'apps', 'web'), { recursive: true });
+    writeFileSync(path.join(mono, 'apps', 'web', 'package.json'), manifest({ 'vcs-protection': '^1.0.0' }));
+    expect(postinstall(wrapper, mono).code).toBe(0);
+    expect(managed(mono, 'pre-commit')).toBe(true);
+
+    const [repo] = project('dlx-user');
+    const dlx = installPackageAt(path.join(tmp, 'pnpm-store', 'dlx', 'x1', 'node_modules', 'vcs-protection'));
+    expect(postinstall(dlx, repo).code).toBe(0);
+    expect(existsSync(hookFile(repo, 'pre-commit'))).toBe(false);
+  });
+
+  it('skips the npx cache', () => {
+    const [repo] = project('npx-user');
+    const wrapper = installPackageAt(path.join(tmp, 'cache', '_npx', 'abc', 'node_modules', 'vcs-protection'));
+    expect(postinstall(wrapper, repo).code).toBe(0);
+    expect(existsSync(hookFile(repo, 'pre-commit'))).toBe(false);
+  });
+
+  it('installs only reference-transaction into a husky-style ignored hooks path, nothing into a tracked one', () => {
+    const [husky, w1] = project('husky');
+    mkdirSync(path.join(husky, '.husky', '_'), { recursive: true });
+    writeFileSync(path.join(husky, '.husky', '_', '.gitignore'), '*\n');
+    gitOk(husky, 'config', 'core.hooksPath', '.husky/_');
+    const r = postinstall(w1, husky);
+    expect(r.code, r.out).toBe(0);
+    expect(existsSync(path.join(husky, '.husky', '_', 'reference-transaction'))).toBe(true);
+    expect(existsSync(path.join(husky, '.husky', '_', 'pre-commit'))).toBe(false);
+
+    const [tracked, w2] = project('tracked-hooks');
+    mkdirSync(path.join(tracked, '.githooks'));
+    gitOk(tracked, 'config', 'core.hooksPath', '.githooks');
+    const t = postinstall(w2, tracked);
+    expect(t.code).toBe(0);
+    expect(t.out).toContain('is tracked in this repository');
+    expect(existsSync(path.join(tracked, '.githooks', 'reference-transaction'))).toBe(false);
   });
 
   it("skips the package's own repository (developing vcs-protection)", () => {

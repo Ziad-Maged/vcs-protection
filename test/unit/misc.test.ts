@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyProtect, applyUnprotect } from '../../src/commands/rules.js';
 import { defaultConfig, parseConfig } from '../../src/config/schema.js';
 import { compareUrl, parseGitHubRemote } from '../../src/github/remote.js';
-import { renderWorkflow } from '../../src/github/workflow.js';
+import { CONCURRENCY_KEY, renderWorkflow } from '../../src/github/workflow.js';
 import { parseRefUpdates } from '../../src/hooks/handlers.js';
 import { renderShim } from '../../src/hooks/shim.js';
 import { blockMessage } from '../../src/messages.js';
@@ -40,6 +40,19 @@ describe('config', () => {
     expect(c.github.poisonPill).toEqual({ enabled: false, workflows: [], checks: [], conclusions: ['failure', 'timed_out'] });
     expect(c.failMode).toBe('open');
     expect(defaultConfig(['main']).github.poisonPill.enabled).toBe(false);
+  });
+
+  it('validates the guard settings', () => {
+    const cfg = (github: object) => JSON.stringify({ version: 1, github });
+    const c = parseConfig(cfg({}), 'x.json');
+    expect(c.github).toMatchObject({ dismissStaleApprovals: false, sweep: '*/30 * * * *', guardLogin: 'github-actions[bot]' });
+    expect(parseConfig(cfg({ sweep: null }), 'x.json').github.sweep).toBeNull();
+    expect(() => parseConfig(cfg({ sweep: 'hourly' }), 'x.json')).toThrow(/github.sweep: must be a 5-field cron/);
+    expect(() => parseConfig(cfg({ guardLogin: 'mallory' }), 'x.json')).toThrow(/github.guardLogin: must be a bot account/);
+    for (const bad of ['rescue ', 'a..b/', '-x/', '/x', 'x//y', 'x/.hidden/', 'x.lock/y']) {
+      expect(() => parseConfig(cfg({ rescueBranchPrefix: bad }), 'x.json'), bad).toThrow(/rescueBranchPrefix/);
+    }
+    expect(parseConfig(cfg({ rescueBranchPrefix: 'rescued/' }), 'x.json').github.rescueBranchPrefix).toBe('rescued/');
   });
 
   it('validates the poison pill', () => {
@@ -89,9 +102,18 @@ describe('rendering', () => {
     const wf = renderWorkflow(defaultConfig(['main', 'release/*']), '1.2.3');
     expect(wf).toContain("      - 'main'\n      - 'release/*'");
     expect(wf).toContain('npx --yes vcs-protection@1.2.3 ci-guard');
-    expect(wf).not.toContain('workflow_run');
+    expect(wf).not.toContain('  workflow_run:\n'); // no trigger (the concurrency expression mentions it)
     expect(wf).not.toContain('checks: read');
-    expect(wf).toContain('${{ github.event.ref || github.event.pull_request.number }}');
+    expect(wf).toContain("  schedule:\n    - cron: '*/30 * * * *'\n  workflow_dispatch:\n");
+    const noSweep = defaultConfig(['main']);
+    noSweep.github.sweep = null;
+    expect(renderWorkflow(noSweep, '1.2.3')).not.toContain('schedule:');
+    expect(renderWorkflow(noSweep, '1.2.3')).toContain('  workflow_dispatch:\n');
+    expect(wf).toContain(`group: vcs-protection-\${{ ${CONCURRENCY_KEY} }}`);
+    expect(wf).toContain("format('pill-{0}', github.run_id)");
+    expect(wf).toContain("format('branch-{0}', github.ref_name)");
+    expect(wf).toContain('      baseline:\n        description:');
+    expect(wf).toContain("          VCS_PROTECTION_GUARD_LOGIN: 'github-actions[bot]'\n");
   });
 
   it('workflow listens to critical workflows when the poison pill is on', () => {
@@ -99,10 +121,10 @@ describe('rendering', () => {
     c.github.poisonPill = { enabled: true, workflows: ['CI', "Bob's E2E"], checks: [], conclusions: ['failure'] };
     const wf = renderWorkflow(c, '1.2.3');
     expect(wf).toContain(
-      "  workflow_run:\n    workflows: ['CI', 'Bob''s E2E']\n    types: [completed]\n    branches:\n      - 'main'\n      - 'release/*'\n\npermissions:",
+      "  workflow_run:\n    workflows: ['CI', 'Bob''s E2E']\n    types: [completed]\n    branches:\n      - 'main'\n      - 'release/*'\n",
     );
     expect(wf).toContain('  statuses: write\n  checks: read\n  actions: read\n');
-    expect(wf).toContain('|| github.event.workflow_run.head_branch }}');
+    expect(wf).toContain(`group: vcs-protection-\${{ ${CONCURRENCY_KEY} }}`);
   });
 
   it('merge messages include a PR compare link', () => {

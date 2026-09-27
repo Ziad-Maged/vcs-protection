@@ -4,7 +4,7 @@ import { loadConfig, localConfigPath } from '../config/load.js';
 import { CONFIG_FILE, defaultConfig } from '../config/schema.js';
 import { gitMaybe } from '../git/exec.js';
 import { currentBranch, gitVersion, remoteDefaultRef, requireRepoRoot } from '../git/repo.js';
-import { installHooks } from '../hooks/install.js';
+import { hooksLocation, installHooks } from '../hooks/install.js';
 import { WORKFLOW_PATH } from '../github/workflow.js';
 import { BYPASS_ENV } from '../hooks/context.js';
 import { c, info, warn } from '../ui.js';
@@ -47,8 +47,14 @@ export async function init(opts: InitOptions): Promise<void> {
 
   const hooksPath = gitMaybe(['config', 'core.hooksPath']);
   if (hooksPath) warn(`core.hooksPath is set to '${hooksPath}'; hooks are installed there and chained with existing ones.`);
+  const where = hooksLocation();
+  if (where.inWorkTree && !where.ignored) {
+    warn('That hooks directory is tracked: the shims contain absolute paths of this machine, so don\'t commit them.');
+  } else if (where.inWorkTree) {
+    warn('That hooks directory looks generated (e.g. husky): its tool may overwrite the shims; reference-transaction is the one that matters.');
+  }
 
-  const res = installHooks(loaded.config.failMode);
+  const res = installHooks(loaded.config.failMode, undefined, undefined, loaded.config.remote);
   info(`${c.green('✔')} Installed git hooks in ${res.dir}: ${res.written.join(', ')}`);
   if (res.chained.length) info(`  Existing hooks kept and chained as *.local: ${res.chained.join(', ')}`);
   for (const w of res.warnings) warn(w);

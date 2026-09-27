@@ -12,6 +12,8 @@ export interface MessageContext {
   /** A local branch that holds the commits being brought in (for merge / push suggestions). */
   sourceBranch: string | null;
   bypassAllowed: boolean;
+  /** The shared remote (`config.remote`); defaults to `origin`. */
+  remote?: string;
   /** Set when git already moved the index/working tree to this commit before the ref update was refused. */
   worktreeMovedTo?: string | null;
 }
@@ -55,6 +57,7 @@ function footer(ctx: MessageContext): string[] {
 
 export function blockMessage(ctx: MessageContext): Message {
   const b = `'${ctx.branch}'`;
+  const r = ctx.remote ?? 'origin';
   const isMerge = ctx.kind === 'pre-merge-commit' || ctx.op === 'merge' || (ctx.kind === 'advance' && ctx.sourceBranch !== null);
 
   if (ctx.kind === 'push' || ctx.kind === 'push-delete') {
@@ -65,7 +68,7 @@ export function blockMessage(ctx: MessageContext): Message {
         `Changes reach ${b} only through ${approvalsText(ctx.rule)}.`,
         ...(ctx.kind === 'push'
           ? [
-              `Push to a feature branch instead: git push -u origin HEAD:${ctx.sourceBranch && ctx.sourceBranch !== ctx.branch ? ctx.sourceBranch : '<feature-branch>'}`,
+              `Push to a feature branch instead: git push -u ${r} HEAD:${ctx.sourceBranch && ctx.sourceBranch !== ctx.branch ? ctx.sourceBranch : '<feature-branch>'}`,
               ...prLines(ctx, ctx.sourceBranch !== ctx.branch ? ctx.sourceBranch : null),
             ]
           : []),
@@ -79,7 +82,7 @@ export function blockMessage(ctx: MessageContext): Message {
       title: `Merging into protected branch ${b} is not allowed.`,
       lines: [
         `Merges into ${b} must go through ${approvalsText(ctx.rule)}.`,
-        ...(ctx.sourceBranch ? [`Push the branch: git push -u origin ${ctx.sourceBranch}`] : []),
+        ...(ctx.sourceBranch ? [`Push the branch: git push -u ${r} ${ctx.sourceBranch}`] : []),
         ...prLines(ctx, ctx.sourceBranch),
         ...(ctx.op === 'merge' ? ['Undo the attempted merge with: git merge --abort'] : []),
         ...footer(ctx),
@@ -91,8 +94,8 @@ export function blockMessage(ctx: MessageContext): Message {
     return {
       title: `Rewriting protected branch ${b} is not allowed.`,
       lines: [
-        `${b} can only move to commits that already exist on origin/${ctx.branch}.`,
-        `To sync with the remote: git fetch && git reset --hard origin/${ctx.branch}`,
+        `${b} can only move to commits that already exist on ${r}/${ctx.branch}.`,
+        `To sync with the remote: git fetch && git reset --hard ${r}/${ctx.branch}`,
         ...(ctx.op === 'rebase' ? ['Abort the rebase with: git rebase --abort'] : []),
         ...footer(ctx),
       ],
@@ -103,7 +106,7 @@ export function blockMessage(ctx: MessageContext): Message {
     return {
       title: `Creating protected branch ${b} from local-only commits is not allowed.`,
       lines: [
-        `Create ${b} from a commit that already exists on the remote, e.g.: git branch ${ctx.branch} origin/main`,
+        `Create ${b} from a commit that already exists on the remote, e.g.: git branch ${ctx.branch} ${r}/HEAD`,
         ...footer(ctx),
       ],
     };

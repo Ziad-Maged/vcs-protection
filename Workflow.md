@@ -24,15 +24,21 @@ This guide tests every command of `vcs-protection` against a real GitHub reposit
 | `unprotect <pattern>`, plus its error cases | 9, 11 |
 | `github setup`, `github setup --pin` | 12 |
 | `audit`, `audit --since --limit`, `audit` without a token | 12 |
-| `install --global`, `install --global --force` | 6 |
+| `install --global`, `install --global --force` | 6, 14 |
+| `studio`, `studio --port`, `--no-open`: every section, actions matching the CLI, confirmations, validation errors, token/Host/Origin checks, outside a repository | 14 |
 | Automatic setup on `npm i -g` (sets `init.templateDir`; leaves a foreign one alone) | 2, 6 |
 | Automatic setup on `npm install` as a dependency (hooks → `node_modules` copy), `npm ci` on a fresh clone | 6 |
 | `npm install-scripts approve` / `--allow-scripts` (npm ≥ 12) | 2, 6 |
 | Opt-outs: `VCS_PROTECTION_SKIP_INSTALL=1`, `CI=true`, `--ignore-scripts` | 6 |
 | `npm uninstall` leaves hooks behind; shim falls back to the global CLI | 6 |
-| `uninstall`, `uninstall --global` | 7, 14 |
+| `uninstall`, `uninstall --global` | 7, 14, 15 |
 | `hook <name>` (internal, called manually) | 7 |
 | `ci-guard` (internal; in Actions, and manually) | 4, 8, 10, 13 |
+| History walk + `vcs-protection/accepted/<branch>` markers, sweep (`schedule`, `workflow_dispatch`), `[skip ci]`, quick successive pushes, reviewed merge on top of a violation, no duplicate issues | 8, 10 |
+| Approvals only from write access; `dismissStaleApprovals` | 8, 10 |
+| Atomic reset; deleted branch restored from the activity log | 8, 10 |
+| Local: `git branch -f` / `update-ref` on a protected branch, push by URL, hook exit code 3 | 5, 7 |
+| Trusted rules only from verified commits: deleted config (C1), `[skip ci]` unprotect (C2); per-branch markers; baseline (automatic at bootstrap, **Run workflow → baseline** otherwise); bypass pushes via the activity log; poison pill reported once | 4, 10 |
 | Poison pill: `github.poisonPill`, `workflow_run` trigger, reset, moved tip (`git revert`), inherited failures, idempotent re-runs | 10 |
 | `postinstall` (internal; run by npm) | 2, 6 |
 | `VCS_PROTECTION_BYPASS` + audit log | 4, 5 |
@@ -75,7 +81,7 @@ $env:WORK = "$HOME\vcsp-e2e"
 New-Item -ItemType Directory -Force $env:WORK
 ```
 
-The automatic setup changes git's global `init.templateDir`. Save the current value first, so you can restore it in Phase 14 (an empty file means it was unset):
+The automatic setup changes git's global `init.templateDir`. Save the current value first, so you can restore it in Phase 15 (an empty file means it was unset):
 
 ```bash
 git config --global init.templateDir > "$WORK/templateDir.bak"; cat "$WORK/templateDir.bak"
@@ -103,8 +109,8 @@ npm test
 **Expected:** `typecheck` prints nothing and exits 0. `npm test` builds `dist/cli.js`, then shows:
 
 ```
-Test Files  5 passed (5)
-     Tests  78 passed (78)
+Test Files  6 passed (6)
+     Tests  143 passed (143)
 ```
 
 - [ ] passed
@@ -115,7 +121,7 @@ Test Files  5 passed (5)
 npm pack --dry-run
 ```
 
-**Expected:** exactly 4 files (`README.md`, `dist/cli.js`, `package.json`, `scripts/postinstall.mjs`). `total files: 4`, and the unpacked size is about 1.1 MB. No `src/`, `test/`, `Workflow.md` or `Documentation.md`.
+**Expected:** exactly 4 files (`README.md`, `dist/cli.js`, `package.json`, `scripts/postinstall.mjs`). `total files: 4`, and the unpacked size is about 1.2 MB (the studio's page is inside `dist/cli.js`). No `src/`, `test/`, `Workflow.md` or `Documentation.md`.
 
 Check that the lifecycle script is declared:
 
@@ -167,7 +173,7 @@ vcs-protection protect --help
 
 **Expected:**
 - `--version` prints `1.0.0`.
-- `--help` lists `init, protect, unprotect, list, status, doctor, github, audit, install, uninstall`. The internal commands `hook`, `ci-guard` and `postinstall` are **not** listed.
+- `--help` lists `init, protect, unprotect, list, status, doctor, github, audit, studio, install, uninstall`. The internal commands `hook`, `ci-guard` and `postinstall` are **not** listed.
 - `github --help` lists `setup`.
 - `protect --help` shows `-a, --approvals`, `--allow-deletion`, `--no-commit` and `--no-push`.
 
@@ -237,7 +243,7 @@ curl -i http://localhost:3000/<one-of-your-routes>
 
 Because of Phase 2.3, `alice` already has the 6 hooks from the global template (`ls .git/hooks | grep -v sample`). They do nothing yet: the repository has no `.vcs-protection.json`.
 
-**Expected:** the server logs a successful MongoDB connection, and the route returns `200` with data from Atlas. This is the **baseline**. Stop the server with Ctrl+C. Repeat this check at the end (Phase 14) to confirm the package never touched the app.
+**Expected:** the server logs a successful MongoDB connection, and the route returns `200` with data from Atlas. This is the **baseline**. Stop the server with Ctrl+C. Repeat this check at the end (Phase 15) to confirm the package never touched the app.
 
 - [ ] passed
 
@@ -339,7 +345,11 @@ head -8 .git/hooks/pre-push
 
 **Expected:**
 - The config has `"version": 1`, `"remote": "origin"`, one rule `{"pattern":"main","requiredApprovals":1,"allowDeletion":false}`, `"bypass": {"allowed": true}`, `"enforcement": "revert"` and `"failMode": "open"`.
-- The workflow triggers on `push` to `'main'`, plus `delete`, `pull_request` and `pull_request_review`, and has the patched checkout + tarball step.
+- The workflow triggers on `push` to `'main'`, plus `delete`, `pull_request`, `pull_request_review`, `schedule` (`cron: '*/30 * * * *'`, the sweep) and `workflow_dispatch`, and has the patched checkout + tarball step.
+
+> From now on the **sweep** runs every 30 minutes (Actions → vcs-protection guard, event `schedule`). Its runs are normally green and quick; they're part of the test (10.11). `workflow_dispatch` lets you start one by hand: **Run workflow** (with an optional **baseline** checkbox, 10.18), or `gh workflow run vcs-protection-guard.yml`.
+>
+> The workflow also sets `VCS_PROTECTION_GUARD_LOGIN: 'github-actions[bot]'` (whose markers count) and a `concurrency` group per branch (`branch-main`), per poison-pill run, for the sweep and per PR.
 - The hook starts with `#!/bin/sh` and `# vcs-protection:managed`, and `VCSP_NODE`/`VCSP_CLI` point to your Node and the global `…/node_modules/vcs-protection/dist/cli.js`.
 
 If your Express repo uses husky (`core.hooksPath`), `init` also prints ``core.hooksPath is set to '…'; hooks are installed there and chained with existing ones.``
@@ -396,7 +406,7 @@ Remove-Item Env:VCS_PROTECTION_BYPASS
 
 Open **Actions → vcs-protection guard** for this push.
 
-**Expected:** a green run whose log/summary says `No .vcs-protection.json at <sha>; nothing to enforce.` The guard judges a push by the rules as they were *before* it, and there were none.
+**Expected:** a green run whose summary says `✅ main: baseline set at <sha7> (this push introduced .vcs-protection.json).` This push introduced the rules on a branch the guard had never verified, so it becomes the guard's **starting point**. On GitHub, the bootstrap commit shows a green **`vcs-protection/accepted/main`** status: the guard's marker, where later runs stop. (Any other way of getting the rules onto `main` would need the baseline step of 10.18.)
 
 - [ ] passed
 
@@ -594,6 +604,26 @@ git reset --hard origin/main
 
 - [ ] passed
 
+### 5.11 Forced moves and pushes by URL
+
+```bash
+git branch release/9 origin/main                               # a protected branch (release/*), from the remote: allowed
+git switch -c feature/local && echo l > local.txt && git add local.txt && git commit -m "local only"
+git switch main
+git branch -f main feature/local; echo "exit=$?"               # refused by git itself: main is checked out
+git update-ref refs/heads/main feature/local; echo "exit=$?"
+git branch -f release/9 feature/local; echo "exit=$?"
+git push "$(git remote get-url origin)" feature/local:main; echo "exit=$?"
+git branch -D release/9 feature/local
+```
+
+**Expected:**
+- `git update-ref` (a forced update, which git reports to the hook with an all-zero old value) is **blocked** with `Merging into protected branch 'main'…` (or `Direct commits…`), not with a "Creating protected branch" message; `main` doesn't move.
+- `git branch -f release/9 feature/local` is **blocked** (`Merging into protected branch 'release/9'…`).
+- The push to the remote's **URL** (instead of the name `origin`) is **blocked** with `Pushing directly to protected branch 'main'`.
+
+- [ ] passed
+
 ---
 
 ## 6. Teammates: manual `init`, automatic setup on `npm install`, and the global template
@@ -650,6 +680,8 @@ npm install --foreground-scripts -D "$PKG/vcs-protection-1.0.0.tgz"
 ```
 
 There is no `No .vcs-protection.json yet` note, because `origin/main` has the rules.
+
+If the Express repo uses **husky** (`core.hooksPath=.husky/_`), the output instead says `core.hooksPath (…/.husky/_) is managed by another tool (e.g. husky); installing only reference-transaction there.` and only that hook is written: husky rewrites the others on every install. Enforcement still works (the `reference-transaction` hook does it); the pre-commit/pre-push messages come later, from the blocked ref update. Adjust the `ls`/`status` expectations below accordingly.
 
 **npm ≥ 12:** the install ends with `npm warn install-scripts 1 package had install scripts blocked …` and no hooks are written. Approve the package (this adds an `allowScripts` entry to `package.json`, which a real team commits once) and reinstall:
 
@@ -872,7 +904,7 @@ vcs-protection hook not-a-hook; echo "exit=$?"
 ```
 
 **Expected:**
-- The first command prints the `Pushing directly to protected branch 'main'` box and `exit=1`.
+- The first command prints the `Pushing directly to protected branch 'main'` box and `exit=3` (3 is the CLI's "block" answer; the shim turns it into a failed hook).
 - The second prints `[vcs-protection] Unknown hook 'not-a-hook'.` and `exit=1`.
 
 - [ ] passed
@@ -923,13 +955,14 @@ gh pr create --base main --head feature/readme --title "docs: readme tweak" --bo
 Click **Merge pull request** on GitHub. Nothing stops you, because there is no server-side branch protection.
 
 **Expected, within about a minute:**
-- The Actions run for the push to `main` is **red**. Its summary shows:
+- The Actions run for the push to `main` is **red**. Its summary shows one line per commit the guard hadn't verified yet, then the actions:
   ```
-  ❌ Pull request #<n> was merged into 'main' without the required approvals (0/1 approvals).
+  ❌ main <sha7>: Pull request #<n> was merged into 'main' without the required approvals (0/1 approvals).
   - Saved the pushed commits on branch 'vcs-protection/rescue/main-<sha7>'.
-  - Reset 'main' back to <sha7-before>.
+  - Reset 'main' back to <boot7>.
   - Opened issue https://github.com/<you>/express-vcs-test/issues/<k>
   ```
+  The walk stopped at the bootstrap commit, which carries the marker since 4.5.
 - `main` on GitHub no longer contains the change. The branch `vcs-protection/rescue/main-<sha7>` exists.
 - The issue is titled `vcs-protection: insufficient-approvals on main (<sha7>)` and mentions `@<you>`, the PR link, the actions taken, and a compare link to open a PR from the rescue branch.
 
@@ -959,7 +992,7 @@ As `<reviewer>`, submit a new review with **Approve**.
 
 Merge the PR as `<you>`.
 
-**Expected:** the guard run for the push is **green**: `✅ refs/heads/main: merged from PR #<n> (1/1 approvals)`. `main` keeps the change.
+**Expected:** the guard run for the push is **green**: `✅ main <sha7>: merged from PR #<n> (1/1 approvals)`. `main` keeps the change, and the merge commit gets the `vcs-protection/accepted/main` status.
 
 Sync your clones:
 
@@ -971,6 +1004,18 @@ cd "$WORK/bob" && git pull
 - [ ] passed
 
 > The rule that the author's own approval never counts is covered by unit tests. GitHub doesn't let authors approve their own PRs anyway.
+
+### 8.5 Only reviewers with write access count
+
+In `express-vcs-test` → **Settings → Collaborators**, change `<reviewer>`'s role to **Read**. Open a PR into `main` (for example from `feature/chain`), and approve it as `<reviewer>`.
+
+**Expected:** `vcs-protection/approvals` stays ❌ `0/1 approvals: merging now will be reverted`: a read-only collaborator's approval doesn't count (the same as GitHub's own branch protection).
+
+Set the role back to **Write**, then **re-request the review** and approve again.
+
+**Expected:** ✅ `1/1 approvals: OK to merge`. Close the PR without merging.
+
+- [ ] passed
 
 ---
 
@@ -1096,7 +1141,7 @@ git push --no-verify origin feature/direct:main
 **Expected:**
 - The push succeeds locally, because `--no-verify` skips pre-push.
 - The guard then:
-  - reports `❌ Commit <sha7> was pushed directly to 'main' instead of being merged from a pull request.`
+  - reports `❌ main <sha7>: Commit <sha7> was pushed directly to 'main' instead of being merged from a pull request.`
   - saves the commit on `vcs-protection/rescue/main-<sha7>`
   - resets `main` to its previous commit
   - opens the issue `vcs-protection: direct-push on main (<sha7>)`
@@ -1139,7 +1184,7 @@ VCS_PROTECTION_BYPASS="cut release" git push origin origin/main:refs/heads/relea
 
 **Expected:**
 - Locally, a bypass warning (pre-push blocks any push to `release/*`) plus the audit log entry.
-- On GitHub, a green guard run: `✅ refs/heads/release/1.0: created from existing 'main' history`. The branch stays.
+- On GitHub, a green guard run: `✅ refs/heads/release/1.0: created from existing 'main' history`. The branch stays, and its tip gets a **`vcs-protection/accepted/release/1.0`** status: the new branch's own starting point (markers are per branch; the `main` marker on the same commit doesn't count for `release/1.0`).
 
 - [ ] passed
 
@@ -1151,23 +1196,24 @@ git push --no-verify origin :release/1.0
 
 **Expected, either one of these:**
 - **(a)** A push-triggered run: `Protected branch 'release/1.0' was deleted.` → `Restored 'release/1.0' at <sha7>.` plus an issue.
-- **(b)** Only the `delete`-triggered run fires. After about 20 seconds it opens the issue `vcs-protection: protected branch release/1.0 deleted`, with restore instructions (`git push origin origin/release/1.0:refs/heads/release/1.0`).
+- **(b)** Only the `delete`-triggered run fires. After about 20 seconds it looks up the deleted tip in the repository activity log and **restores the branch itself**: `Restored 'release/1.0' at <sha7>.` plus the issue `vcs-protection: deleted on release/1.0 (<sha7>)`.
+- **(b′)** If the activity log has no entry, it opens `vcs-protection: protected branch release/1.0 deleted` instead, with the restore command `VCS_PROTECTION_BYPASS="restore release/1.0" git push origin origin/release/1.0:refs/heads/release/1.0`. Run it: the guard accepts the re-created branch because its commit is verified.
 
-Write down which one happened. If (b), restore the branch with the command from the issue (it needs the bypass, because pre-push protects `release/*`).
+Write down which one happened.
 
-- [ ] passed (a / b: ____)
+- [ ] passed (a / b / b′: ____)
 
 ### 10.6 Optional: `github.bypassUsers` and `enforcement: "report"`
 
 Using the Phase 9 flow, edit the config on a PR branch:
 - **(A)** Add `"bypassUsers": ["<you>"]` under `github`. Merge it with `<reviewer>`'s approval. Repeat 10.1.
 
-  **Expected:** a green run: `✅ refs/heads/main: <you> is in github.bypassUsers`. The commit stays.
+  **Expected:** a green run: `✅ main <sha7>: <you> is in github.bypassUsers`. The commit stays and gets the accepted marker.
 
   Remove the setting afterwards the same way.
 - **(B)** Set `"enforcement": "report"`, merge it, and repeat 10.1.
 
-  **Expected:** a red run and an issue whose Actions list says `Enforcement is "report": nothing was reverted.`. `main` keeps the commit.
+  **Expected:** a red run and an issue whose Actions list says `Did not reset 'main': enforcement is "report".`, with the `git revert <sha>` steps. `main` keeps the commit, which gets a **failing** `vcs-protection/accepted/main` status ("reported: <issue url>"). The next sweep doesn't open a second issue for it.
 
   Revert the setting afterwards, and remove the commit via a PR.
 
@@ -1272,7 +1318,7 @@ gh pr create --base main --head feature/innocent --title "Innocent" --body "e2e"
 As `<reviewer>`, approve both. Then merge `Break again`, and **within 90 s** merge `Innocent` (it merges cleanly on top).
 
 **Expected:**
-- For the `break2` merge commit, a **red** guard run: the rescue branch is saved, then `Did NOT move 'main': it changed again after this push (now <sha7>). Fix it manually.`, and an issue. The issue has an **"Undo it through a pull request"** section:
+- For the `break2` merge commit, a **red** guard run: the rescue branch is saved, then `Did NOT move 'main': it changed again (now <sha7>). The next guard run re-checks it.` (the atomic update refused because `Innocent` landed on top), and an issue. The issue has an **"Undo it through a pull request"** section:
   ```sh
   git fetch origin && git switch -c vcs-protection/revert-<sha7> origin/main
   git revert -m 1 <sha>
@@ -1280,6 +1326,10 @@ As `<reviewer>`, approve both. Then merge `Break again`, and **within 90 s** mer
   ```
   and a compare link.
 - For the `innocent` merge commit, `CI` fails too (`BREAK_TESTS` is still there), but its guard run is **green**: `✅ main: test already failed on <sha7>; not caused by <sha7>`. `main` still contains both merges.
+
+Before reverting, check that the poison pill reports a commit only once: open the failed `CI` run of the `break2` merge on `main` and click **Re-run all jobs**.
+
+**Expected:** it fails again, and its guard run is **green**: `✅ main: <sha7> was already reported by the poison pill`. No second issue. (The first report left a `vcs-protection/poison-pill` status on the commit.)
 
 Follow the issue's instructions to revert, then get the revert PR approved and merged.
 
@@ -1295,6 +1345,160 @@ Check the guard runs from the previous steps (Actions → vcs-protection guard, 
 - **Unlisted workflows:** workflows other than `CI` never wake the guard.
 
 Optionally, set `"conclusions": ["failure", "timed_out", "cancelled"]` through a rules PR, merge something, and cancel its `CI` run on `main`. **Expected:** the commit is reset, like in 10.8. With the default conclusions, a cancelled run is ignored.
+
+- [ ] passed / skipped
+
+### 10.11 `[skip ci]`: the sweep catches what no push run saw
+
+```bash
+cd "$WORK/alice" && git switch main && git fetch && git reset --hard origin/main
+git commit --allow-empty -m "sneaky change [skip ci]"
+git push --no-verify origin main
+```
+
+**Expected:** the push succeeds, and **no** workflow starts for it (GitHub honours `[skip ci]`). The commit is on `main` for now.
+
+Start the sweep by hand instead of waiting up to 30 minutes:
+
+```bash
+gh workflow run vcs-protection-guard.yml
+```
+
+(or Actions → vcs-protection guard → **Run workflow**)
+
+**Expected:** the `workflow_dispatch` run is **red**: `❌ main <sha7>: Commit <sha7> was pushed directly to 'main' …`, a rescue branch, `Reset 'main' back to <sha7>.` and an issue `vcs-protection: direct-push on main (<sha7>)`. Leave the next scheduled sweep alone: it is green (`✅ main: <sha7> is verified.`).
+
+Resync: `git fetch && git reset --hard origin/main`.
+
+- [ ] passed
+
+### 10.12 Two quick direct pushes: both are reset
+
+```bash
+git commit --allow-empty -m "bad 1" && B1=$(git rev-parse HEAD)
+git commit --allow-empty -m "bad 2"
+git push --no-verify origin "$B1":main && git push --no-verify origin HEAD:main
+```
+
+**Expected:** two push runs. One of them is **red**, lists **both** commits (`❌ main <bad2>` and `❌ main <bad1>`) and resets `main` back to before `bad 1`; the issue lists both. The other run is green (`is verified`), or reports `Did NOT move 'main': it changed again … The next guard run re-checks it.` Either way, **neither** commit stays on `main` (before this version, the first one did). If GitHub rejected the second push (the first was already reset), push both again faster, or use `workflow_dispatch` after the two pushes.
+
+Resync: `git fetch && git reset --hard origin/main`.
+
+- [ ] passed
+
+### 10.13 A reviewed merge on top of an unreviewed commit: reported, not thrown away
+
+```bash
+git commit --allow-empty -m "unreviewed [skip ci]" && git push --no-verify origin main
+git switch -c feature/on-top && echo top > top.txt && git add top.txt && git commit -m "reviewed change" && git push -u origin feature/on-top
+gh pr create --base main --head feature/on-top --title "Reviewed change" --body "e2e"
+```
+
+As `<reviewer>`, approve; then merge (the PR sits on top of the unreviewed commit).
+
+**Expected:**
+- The push run for the merge is **red**: `✅ main <merge7>: merged from PR #<n> (1/1 approvals)`, `❌ main <sha7>: Commit <sha7> was pushed directly …`, `Did not reset 'main': reviewed changes were merged on top of it.` and an issue whose **"Undo them through a pull request"** section has `git revert <sha>`.
+- On GitHub, the merge commit has a green `vcs-protection/accepted/main` status and the unreviewed commit a failing one.
+- The next sweep is green and opens no second issue.
+
+Follow the issue's revert steps through a PR (approved and merged) to remove the unreviewed commit.
+
+- [ ] passed
+
+### 10.14 Optional: `dismissStaleApprovals`
+
+Through a rules PR (Phase 9 flow), set `"dismissStaleApprovals": true` under `github` and merge it. Then open a PR, have `<reviewer>` approve it, push one more commit to the PR branch, and merge.
+
+**Expected:** `vcs-protection/approvals` turns ❌ after the extra commit (`0/1 approvals`), and the merge is reset like in 8.2 (`insufficient-approvals`). Revert the setting afterwards.
+
+- [ ] passed / skipped
+
+### 10.15 Deleting the rules in a direct push doesn't turn protection off
+
+```bash
+cd "$WORK/alice" && git switch main && git fetch && git reset --hard origin/main
+git rm -q .vcs-protection.json && git commit -m "remove protection" --no-verify
+git push --no-verify origin main
+```
+
+**Expected:** a **red** push run: `❌ main <sha7>: Commit <sha7> was pushed directly to 'main' …`, the rescue branch, `Reset 'main' back to <sha7>.` and an issue. `.vcs-protection.json` is back on `main`. The guard judged the commit by the rules of the last verified commit, not by the (missing) rules in the commit itself. Breaking the JSON instead of deleting the file gives the same result.
+
+Resync: `git fetch && git reset --hard origin/main`.
+
+- [ ] passed
+
+### 10.16 A `[skip ci]` commit that unprotects `main` is still judged
+
+```bash
+node -e 'const fs=require("fs"),f=".vcs-protection.json",c=JSON.parse(fs.readFileSync(f));c.protected=c.protected.filter(r=>r.pattern!=="main");fs.writeFileSync(f,JSON.stringify(c,null,2)+"\n")'
+git commit -am "unprotect main [skip ci]" --no-verify && git push --no-verify origin main
+gh workflow run vcs-protection-guard.yml
+```
+
+**Expected:** no push run (`[skip ci]`). The `workflow_dispatch` sweep is **red**: it judges `main` by the rules of the last verified commit (which protect it), resets `main` and opens an issue. `vcs-protection list` after `git fetch` shows `main` again.
+
+Resync: `git fetch && git reset --hard origin/main`.
+
+- [ ] passed
+
+### 10.17 Markers are per branch
+
+A commit verified for `release/1.0` is not verified for `main`. Branch off the current `main`, open a PR **into `release/1.0`**, have `<reviewer>` approve it, and merge it. Then move `main` to that merge commit directly (it only works while `main` hasn't moved; run it right after the merge):
+
+```bash
+git fetch
+git push --no-verify origin origin/release/1.0:main
+```
+
+**Expected:**
+- The PR's merge commit has a green `vcs-protection/accepted/release/1.0` status.
+- The push run for `main` is **red**: the merge commit came from a PR into `release/1.0`, not into `main`, so it is a `direct-push` there; `main` is reset.
+
+Resync: `git fetch && git reset --hard origin/main`.
+
+- [ ] passed / skipped
+
+### 10.18 Baseline: a protected branch the guard has never seen
+
+Create a branch **before** it is protected, so the guard never runs for it:
+
+```bash
+git switch -c hotfix/1 && git commit --allow-empty -m "hotfix work" && git push -u origin hotfix/1
+git switch main
+vcs-protection protect "hotfix/*"
+node "$WORK/dev-patch-workflow.mjs" . && git commit -am "dev: re-apply tarball patch" && git push
+```
+
+As `<reviewer>`, approve the rules PR and merge it. Then run the sweep:
+
+```bash
+gh workflow run vcs-protection-guard.yml
+```
+
+**Expected:** the sweep is **red** with `❌ No verified commit on 'hotfix/1' in the last 100 commits: run the guard once with baseline (Actions → vcs-protection guard → Run workflow → baseline).` Nothing is reset and no issue is opened.
+
+Now run it with the baseline:
+
+```bash
+gh workflow run vcs-protection-guard.yml -f baseline=true
+```
+
+**Expected:** a green run: `✅ Baseline set on main at <sha7>.`, `✅ Baseline set on release/1.0 at <sha7>.`, `✅ Baseline set on hotfix/1 at <sha7>.` Each tip gets a `vcs-protection/accepted/<branch>` status with the description `baseline by @<you>`. The next sweep is green.
+
+Clean up through the Phase 9 flow: `vcs-protection unprotect "hotfix/*"` (approve and merge), then `git push origin :hotfix/1`.
+
+- [ ] passed
+
+### 10.19 Optional: a bypass user's `[skip ci]` push survives the sweep
+
+With `"bypassUsers": ["<you>"]` in place (10.6 (A)):
+
+```bash
+git commit --allow-empty -m "chore(release): 1.2.3 [skip ci]" && git push --no-verify origin main
+gh workflow run vcs-protection-guard.yml
+```
+
+**Expected:** a green sweep: `✅ main <sha7>: <you> is in github.bypassUsers`. The guard found who pushed the commit in GitHub's activity log, even though no push run happened. The commit stays and gets the accepted marker.
 
 - [ ] passed / skipped
 
@@ -1363,7 +1567,8 @@ vcs-protection github setup
 ```
 
 **Expected:**
-- `✔ Wrote .github\workflows\vcs-protection-guard.yml (runs vcs-protection@1.0.0)`, followed by the three "the guard will…" bullets and the Workflow permissions reminder.
+- `✔ Wrote .github\workflows\vcs-protection-guard.yml (runs vcs-protection@1.0.0)`, followed by the "the guard will…" bullets and the Workflow permissions reminder.
+- `vcs-protection github setup --pin 'x;y'` is refused: `Invalid --pin: 'x;y' (expected a version such as 1.2.3).`
 - `git diff` shows the patch was removed and `npx --yes vcs-protection@1.0.0 ci-guard` is back.
 
 Re-patch and throw the branch away:
@@ -1383,11 +1588,13 @@ vcs-protection audit --since "1 day ago" --limit 20; echo "exit=$?"
 
 **Expected:**
 - `Local bypasses (N)`: one line per entry, showing time, identity, hook, ref, sha and `"reason"` (initial setup ×2, e2e bypass test, cut release).
-- `main: checking K commit(s)`:
-  - `✔ <sha7> PR #<n> (1/1 approvals)` for the approved merges (8.4, 9.2, 11.2, 11.3)
-  - `✖ <sha7> not from a merged pull request: chore: add vcs-protection (…)` for the bootstrap commit
-  - `✖` for the `allowed now` commit from 11.2
-- `release/1.0: checking …`: its commits are `main` commits, so they're matched against PRs into `release/1.0`. Expect `✖` lines here. This is correct: those commits weren't merged via PRs into that branch.
+- `main: checking K commit(s)`. `audit` judges exactly like the guard (each commit by the rules at that point in history):
+  - `✔ <sha7> merged from PR #<n> (1/1 approvals)` for the approved merges (8.4, 9.2, 11.2, 11.3, 10.9, the revert PR)
+  - `✔ <sha7> before branch protection was set up` for the bootstrap commit
+  - `✔ <sha7> 'main' was not protected at that point` for the `allowed now` commit from 11.2
+  - `✔ <sha7> <you> is in github.bypassUsers` is **not** shown for 10.6 (A): `audit` doesn't know who pushed; that commit shows as `✖ … pushed directly …`
+  - `✖` for commits that were reported but kept: 10.6 (B) and 10.13
+- `release/1.0: checking …`: its history is `main` history. Commits from after `release/*` became protected (9.2) show `✖`, because they were merged into `main`, not `release/1.0`; older ones show `✔ … was not protected at that point`. The guard itself accepted the branch because it was created at a verified commit (10.4).
 - `<P> problem(s) found.` and `exit=1`.
 
 Reverted commits (Phase 8.2 and 10) don't appear, because they're no longer on the branches.
@@ -1448,9 +1655,125 @@ Close the PR afterwards.
 
 ---
 
-## 14. Cleanup and the publish checklist
+## 14. Studio
 
-### 14.1 Clean up the test environment
+The studio is a web UI for the same commands. Run it in `alice` (a clone with rules, hooks and the guard, synced with `origin/main`). Every step names the command whose result it should match.
+
+### 14.1 Start it
+
+```bash
+cd "$WORK/alice" && git switch main && git fetch && git reset --hard origin/main
+vcs-protection studio
+```
+
+**Expected:**
+- The terminal prints `✔ Studio running at http://127.0.0.1:<port>/?t=<token>` and `Only this computer can reach it, and only with this link. Press Ctrl+C to stop.`
+- The browser opens the link. Once loaded, the address bar shows `http://127.0.0.1:<port>/` (the token is removed).
+- The header shows the repo name, `branch main`, a green `rules from origin (shared)` chip and `v1.0.0`.
+- The browser's developer console shows no errors (in particular no "Content Security Policy" errors).
+
+Keep it running for the next steps. After each step, compare with the terminal command in brackets.
+
+- [ ] passed
+
+### 14.2 Overview and repairs (`status`, `doctor`, `doctor --fix`)
+
+In a second terminal: `rm "$WORK/alice/.git/hooks/pre-push"`. In the browser, switch to another tab and back (the page refreshes when it regains focus).
+
+**Expected:**
+- **Git hooks** shows `5 / 6`, and the Health table has `✖ hook pre-push  missing`; the other checks match `vcs-protection doctor` (only `GitHub guard` is ✖ while the dev patch is applied).
+- **Repair hooks** opens a result dialog with the same lines as `doctor --fix` (`✔ hook pre-push … repaired`) and a green `success` chip; the count goes back to `6 / 6`.
+
+- [ ] passed
+
+### 14.3 Rules (`protect`, `unprotect`)
+
+In **Rules**:
+
+1. Add `staging` with 1 approval, keeping "Commit on a branch, push and open a pull request".
+
+   **Expected:** the result dialog shows the same lines as `vcs-protection protect staging` in 9.1 (`✔ 'staging' is now protected …`, `✔ Created branch vcs-protection/rules-…`, `✔ Committed …`, `✔ Pushed …`, `✔ Opened pull request: https://github.com/<you>/express-vcs-test/pull/<n>`). The PR link is clickable, and the PR exists on GitHub. The table doesn't show `staging` yet: the rules in force come from `origin/main`, and the header shows `local changes not merged`.
+2. Close the PR on GitHub without merging, then `git switch main && git branch -D vcs-protection/rules-*` in the terminal.
+3. Set the share selector to **Only edit .vcs-protection.json**, change `release/*` to 3 approvals and click **Save**.
+
+   **Expected:** `✔ 'release/*' is now protected (3 approval(s) required).` plus `Commit .vcs-protection.json and … to share this change.`; `git status --short` shows both files modified. The share selector stays on "Only edit" after the refresh.
+4. Click **Remove** on `release/*` (still "Only edit").
+
+   **Expected:** a confirmation dialog explaining that it stays protected until the change is merged. **Cancel** changes nothing; **Unprotect release/*** shows `✔ 'release/*' removed from protected branches.`
+5. Throw the experiment away: `git checkout -- .`
+6. Enter `x` as the pattern and `-1` as approvals, then **Protect**.
+
+   **Expected:** a failed dialog listing `approvals: Too small: expected number to be >=0`; nothing changed.
+
+- [ ] passed
+
+### 14.4 Guard settings (`github setup` after editing the config)
+
+In **Guard settings**, set **Sweep** to *Every hour*, keep "Commit on a branch, push and open a pull request" and click **Save settings**.
+
+**Expected:**
+- The dialog shows `✔ Settings updated in .vcs-protection.json.`, the branch/commit/push lines and `✔ Opened pull request: …`.
+- The PR's diff changes `"sweep"` to `"0 * * * *"` and the workflow's `cron:` to `'0 * * * *'` (re-apply the dev patch on that branch if you merge it; otherwise close the PR and delete the branch).
+
+Then choose *Custom cron…* with `hourly` and **Save settings** with "Only edit".
+
+**Expected:** a failed dialog with `github.sweep: must be a 5-field cron expression`, and no file changed.
+
+- [ ] passed
+
+### 14.5 Hooks, GitHub guard, audit, machine
+
+1. **Hooks:** the six hooks are `installed`. **Uninstall** asks for confirmation; after confirming, all six are `missing` (as after `vcs-protection uninstall`). **Install / refresh** puts them back.
+2. **GitHub guard:** the workflow chip reads `out of date` while the dev patch is applied. The links open the repository's Actions page and the guard workflow's page (with **Run workflow** and the **baseline** checkbox). Enter `1.0.0` and click **Write workflow**: the dialog matches `vcs-protection github setup --pin 1.0.0` (12.1). Afterwards run `git checkout -- .` to restore the committed (patched) workflow.
+3. **Audit:** **Run audit** with *Since* `1 day ago`: the tables per branch match the ✔/✖ lines of `vcs-protection audit --since "1 day ago"` (12.2), and commit ids link to GitHub. The **Local bypasses** table lists the same entries as the audit's `Local bypasses (N)`.
+4. **Machine:** the state matches `git config --global init.templateDir`. **Remove** asks for confirmation, then shows `✔ Removed the global git template.`; **Install** puts it back (`✔ New clones will get vcs-protection hooks automatically …`).
+
+- [ ] passed
+
+### 14.6 Only the studio's own page can use it
+
+With the studio still running (use its port and token):
+
+```bash
+PORT=<port>; TOKEN=<token>
+curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$PORT/"                                      # 403: no token
+curl -s -w ' %{http_code}\n' "http://127.0.0.1:$PORT/api/state"                                          # 403
+curl -s -w ' %{http_code}\n' -H "X-Studio-Token: $TOKEN" -H 'Host: evil.com' "http://127.0.0.1:$PORT/api/state"   # 403
+curl -s -w ' %{http_code}\n' -X POST -H "X-Studio-Token: $TOKEN" -H 'Origin: https://evil.com' \
+  -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$PORT/api/actions/repairHooks"         # 403
+curl -s -w ' %{http_code}\n' -H "X-Studio-Token: $TOKEN" "http://127.0.0.1:$PORT/api/state" | head -c 80  # 200
+```
+
+**PS:** use `curl.exe` instead of `curl`.
+
+**Expected:** the status codes in the comments. The 403 bodies say `Missing or wrong studio token.`, `Unexpected Host header.` and `Cross-origin request refused.`. From another computer on the network, `http://<your-ip>:<port>/` doesn't connect at all.
+
+- [ ] passed
+
+### 14.7 Options, stopping, and outside a repository
+
+```bash
+# in the studio's terminal: Ctrl+C
+vcs-protection studio --port 4777 --no-open      # prints the link, opens nothing; Ctrl+C
+vcs-protection studio --port 4777 --no-open &    # while one runs, a second on the same port:
+vcs-protection studio --port 4777 --no-open; echo "exit=$?"; kill %1
+cd "$WORK" && vcs-protection studio              # outside any repository
+```
+
+**Expected:**
+- Ctrl+C prints `Studio stopped.`, and an open tab then shows "Lost contact with the studio".
+- With `--no-open` no browser opens, and the link uses port 4777.
+- The second studio on the same port fails with `Port 4777 is already in use; pick another with --port, or omit it for a free one.` and `exit=1`.
+- An old link doesn't work after a restart: with a random port it doesn't connect at all; with the same `--port` it shows "This studio link is not valid" (a new token per start).
+- Outside a repository only **Overview** (a "not inside a git repository" notice) and **Machine** are shown.
+
+- [ ] passed
+
+---
+
+## 15. Cleanup and the publish checklist
+
+### 15.1 Clean up the test environment
 
 ```bash
 cd "$WORK/alice" && vcs-protection uninstall
@@ -1482,11 +1805,11 @@ Re-run the app baseline from 3.3 once (`npm start` + `curl`). **Expected:** iden
 
 - [ ] done
 
-### 14.2 Record findings
+### 15.2 Record findings
 
 For each unchecked box, note the step, the actual output, and your OS/shell. Fix the issues in `PKG`, then re-run from Phase 2 (`npm test`, `npm pack`, `npm i -g` (which re-runs the automatic setup), copy the new tarball into `.vcs-protection-dev/` through an approved PR).
 
-### 14.3 Publish checklist
+### 15.3 Publish checklist
 
 - [ ] All phases above passed (or have accepted notes)
 - [ ] The package name is free: `npm view vcs-protection` returns 404. If it doesn't, rename it to a scoped `@<you>/vcs-protection`, and update `bin` usage and the `npx` line in `src/github/workflow.ts`.
@@ -1514,5 +1837,13 @@ For each unchecked box, note the step, the actual output, and your OS/shell. Fix
 | `npm i -g` left `init.templateDir` unchanged | Another template was already configured. `vcs-protection install --global --force` replaces it. |
 | Poison pill: no guard run after `CI` finishes | The guard with the `workflow_run` trigger isn't on `main` yet (GitHub only uses the default branch's copy), or the name in `workflows` doesn't match `name: CI`. |
 | Poison pill guard run logs `Ignoring event 'workflow_run'` | `.vcs-protection-dev/vcs-protection.tgz` on `main` is an old build. Redo the first commands of 10.7. |
+| Guard run says `Could NOT save the pushed commits on '…'` and didn't reset | The rescue branch name is taken by another commit or invalid. Delete the old rescue branch, then run the guard again (`workflow_dispatch`). |
+| An approved merge is reset as `insufficient-approvals` | The approver has only Read/Triage access (8.5), or `dismissStaleApprovals` is on and there were commits after the approval (10.14). |
+| Guard runs are red with `No verified commit on '<branch>' … run the guard once with baseline` | The branch has no starting point (10.18): run the workflow with **baseline** after checking the branch. |
+| `Could not open an issue (issues are disabled)` in a guard run | Issues are turned off for the test repo (3.2 step 3). |
+| Studio: the browser doesn't open, or you work over SSH | Use `--no-open` and open the printed link; over SSH forward the port first (`ssh -L 4777:127.0.0.1:4777 …`, then `--port 4777`). |
+| Studio: 403 / "This studio link is not valid" | The tab is from an earlier start; open the link the running studio printed. |
+| Studio: a PR isn't opened ("Open the pull request: …" instead) | No GitHub token, as with `protect` (9.1). |
+| No `schedule` runs appear | GitHub disables scheduled workflows in repositories without recent activity, and schedules can be delayed at busy times. Use `workflow_dispatch`. |
 | `protect` doesn't open a PR | No token found. Run `gh auth status`, or set `GITHUB_TOKEN`. |
 | Every commit feels slow | Each blocked or protected-branch operation starts Node (about 150–200 ms). Commits on feature branches pay this once, for pre-commit. |

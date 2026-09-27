@@ -166,6 +166,27 @@ describe('local enforcement', () => {
     expect(git(alice, 'branch', 'release/1.0', 'origin/main').code).toBe(0);
   });
 
+  it('blocks forced moves of an existing protected branch (zero old value in the hook)', () => {
+    // release/1.0 now exists locally at origin/main; `branch -f` reports a zero old value.
+    const before = head(alice, 'release/1.0');
+    const r = git(alice, 'branch', '-f', 'release/1.0', 'feature/x');
+    expect(r.code, r.out).not.toBe(0);
+    expect(head(alice, 'release/1.0')).toBe(before);
+    const u = git(alice, 'update-ref', 'refs/heads/main', head(alice, 'feature/x'));
+    expect(u.code, u.out).not.toBe(0);
+    expect(u.out).not.toContain('Creating protected branch');
+    expect(head(alice, 'main')).toBe(head(alice, 'origin/main'));
+  });
+
+  it('blocks pushes to the shared remote given by URL instead of by name', () => {
+    // A fast-forward commit on top of origin/main (commit-tree moves no ref, so no hook runs here).
+    gitOk(alice, 'fetch');
+    const next = gitOk(alice, 'commit-tree', 'origin/main^{tree}', '-p', 'origin/main', '-m', 'push by url');
+    const r = git(alice, 'push', origin, `${next}:refs/heads/main`);
+    expect(r.code).not.toBe(0);
+    expect(r.out, r.out).toContain("Pushing directly to protected branch 'main'");
+  });
+
   it('logs bypasses', () => {
     const log = readFileSync(path.join(bob, '.git', 'vcs-protection', 'audit.log'), 'utf8');
     const entries = log.trim().split('\n').map((l) => JSON.parse(l));
@@ -200,6 +221,30 @@ describe('hook management', () => {
     expect(r.out).toContain('Repaired git hooks: reference-transaction');
     expect(existsSync(hook)).toBe(true);
     gitOk(alice, 'switch', 'main');
+  });
+});
+
+describe('failMode when the CLI crashes', () => {
+  it('open: warns and allows; closed: blocks', () => {
+    const dave = path.join(tmp, 'dave');
+    gitOk(tmp, 'clone', origin, dave);
+    const crash = path.join(tmp, 'crash.mjs');
+    writeFileSync(crash, 'process.exit(2);\n');
+    // Install shims that point at a "CLI" that always crashes.
+    const install = run(process.execPath, [CLI, 'init'], dave, { VCS_PROTECTION_CLI_PATH: crash });
+    expect(install.code, install.out).toBe(0);
+
+    const open = commitFile(dave, 'open.txt');
+    expect(open.code, open.out).toBe(0);
+    expect(open.out).toContain('check failed (exit 2); failMode is open');
+
+    for (const hook of ['pre-commit', 'reference-transaction']) {
+      const file = path.join(dave, '.git', 'hooks', hook);
+      writeFileSync(file, readFileSync(file, 'utf8').replace("VCSP_FAIL='open'", "VCSP_FAIL='closed'"));
+    }
+    const before = head(dave);
+    expect(commitFile(dave, 'closed.txt').code).not.toBe(0);
+    expect(head(dave)).toBe(before);
   });
 });
 

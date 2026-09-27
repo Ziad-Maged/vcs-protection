@@ -11,6 +11,9 @@ export const HOOKS = [
 
 export type HookName = (typeof HOOKS)[number];
 
+/** Exit code of `vcs-protection hook` that means "block this operation". Any other non-zero code is a crash. */
+export const BLOCK_EXIT = 3;
+
 /** Hooks that receive data on stdin that must be forwarded to both our handler and a chained hook. */
 const STDIN_HOOKS: ReadonlySet<HookName> = new Set(['reference-transaction', 'pre-push']);
 /** Hooks whose outcome cannot block anything; our part never fails them. */
@@ -21,6 +24,8 @@ export interface ShimOptions {
   nodePath: string;
   cliPath: string;
   failMode: 'open' | 'closed';
+  /** The shared remote (`config.remote`) whose default branch may hold the config. */
+  remote?: string;
 }
 
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -33,9 +38,13 @@ const posix = (p: string) => p.replace(/\\/g, '/');
  * - For reference-transaction, only starts Node for the `prepared` state when a local branch
  *   (refs/heads/*) is involved, so `git fetch` never pays the Node startup cost.
  * - Chains a pre-existing hook that was renamed to `<hook>.local` at install time.
+ * - The CLI exits BLOCK_EXIT to block. Any other failure (crash, old Node, broken install) follows
+ *   `failMode`, so `open` never locks people out because of a bug.
  */
 export function renderShim(o: ShimOptions): string {
   const stdin = STDIN_HOOKS.has(o.hook);
+  // Remote names can't contain shell metacharacters that matter here, but stay safe anyway.
+  const remote = /^[A-Za-z0-9._-]+$/.test(o.remote ?? '') ? o.remote! : 'origin';
   const advisory = ADVISORY_HOOKS.has(o.hook);
 
   const gate =
@@ -68,7 +77,7 @@ ${stdin ? 'VCSP_INPUT=$(cat)\n' : ''}
 vcsp_relevant() {
   vcsp_top=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
   [ -f "$vcsp_top/.vcs-protection.json" ] && return 0
-  for vcsp_ref in refs/remotes/origin/HEAD refs/remotes/origin/main refs/remotes/origin/master; do
+  for vcsp_ref in refs/remotes/${remote}/HEAD refs/remotes/${remote}/main refs/remotes/${remote}/master; do
     git cat-file -e "$vcsp_ref:.vcs-protection.json" 2>/dev/null && return 0
   done
   return 1
@@ -83,13 +92,24 @@ vcsp_run() {
     vcs-protection hook "$VCSP_HOOK" "$@"
   else
     echo "[vcs-protection] CLI not found: branch protection is NOT active. Reinstall: npm i -g vcs-protection && vcs-protection init" >&2
-    [ "$VCSP_FAIL" = "closed" ] && return 1
+    [ "$VCSP_FAIL" = "closed" ] && return ${BLOCK_EXIT}
     return 0
   fi
 }
 
 if vcsp_should_run "$@"; then
-  ${invokeOurs}${advisory ? ' || true' : ' || exit 1'}
+${
+  advisory
+    ? `  ${invokeOurs} || true`
+    : `  ${invokeOurs}
+  vcsp_code=$?
+  if [ "$vcsp_code" -eq ${BLOCK_EXIT} ]; then
+    exit 1
+  elif [ "$vcsp_code" -ne 0 ]; then
+    echo "[vcs-protection] the $VCSP_HOOK check failed (exit $vcsp_code); failMode is $VCSP_FAIL." >&2
+    [ "$VCSP_FAIL" = "closed" ] && exit 1
+  fi`
+}
 fi
 
 if [ -f "$VCSP_LOCAL" ]; then
