@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { request } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { once } from 'node:events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const CLI = path.resolve(__dirname, '../../dist/cli.js');
@@ -71,6 +72,14 @@ const act = (s: Studio, name: string, args: object, h: Record<string, string> = 
 
 let studio: Studio;
 
+async function stopStudio(s?: Studio, signal: NodeJS.Signals = 'SIGKILL'): Promise<void> {
+  if (!s) return;
+  if (s.child.exitCode !== null || s.child.signalCode !== null) return;
+  const closed = once(s.child, 'close');
+  s.child.kill(signal);
+  await closed;
+}
+
 beforeAll(async () => {
   if (!existsSync(CLI)) throw new Error('Build first: npm run build');
   mkdirSync(path.join(tmp, 'home'), { recursive: true });
@@ -81,8 +90,8 @@ beforeAll(async () => {
   studio = await startStudio(repo);
 });
 
-afterAll(() => {
-  studio?.child.kill('SIGKILL');
+afterAll(async () => {
+  await stopStudio(studio);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -174,7 +183,7 @@ describe('studio: lifecycle', () => {
     try {
       expect((await api(s, '/api/state')).json().repo).toBeNull();
     } finally {
-      s.child.kill('SIGKILL');
+      await stopStudio(s);
     }
   });
 
