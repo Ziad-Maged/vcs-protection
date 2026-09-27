@@ -39,6 +39,18 @@ const gitConfig = (cwd: string, key: string) => {
   const r = git(cwd, 'config', '--bool', key);
   return r.code === 0 ? r.out.trim() : null;
 };
+const caseInsensitiveFs = (cwd: string) => {
+  const configured = gitConfig(cwd, 'core.ignorecase');
+  if (configured === 'true' || configured === 'false') return configured === 'true';
+  const probe = path.join(cwd, '.git', `vcsp-case-check-${process.pid}-${Date.now()}`);
+  const alias = probe.toUpperCase();
+  writeFileSync(probe, '');
+  try {
+    return probe !== alias && existsSync(alias);
+  } finally {
+    rmSync(probe, { force: true });
+  }
+};
 const bypass = (cwd: string, ...args: string[]) => run('git', args, cwd, { VCS_PROTECTION_BYPASS: 'test setup' });
 const cli = (cwd: string, ...args: string[]) => run(process.execPath, [CLI, ...args], cwd);
 const head = (cwd: string, ref = 'HEAD') => gitOk(cwd, 'rev-parse', ref);
@@ -171,7 +183,7 @@ describe('local enforcement', () => {
   });
 
   it('blocks a case-only variant of a protected branch on case-insensitive filesystems', () => {
-    if (gitConfig(alice, 'core.ignorecase') !== 'true') return;
+    if (!caseInsensitiveFs(alice)) return;
     const before = head(alice, 'main');
     const r = git(alice, 'update-ref', 'refs/heads/MAIN', head(alice, 'feature/x'));
     expect(r.code, r.out).not.toBe(0);

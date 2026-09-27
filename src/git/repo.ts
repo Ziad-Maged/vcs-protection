@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { git, gitMaybe, gitOk } from './exec.js';
 
@@ -42,7 +42,16 @@ export function currentBranch(cwd?: string): string | null {
 }
 
 export function ignoreCaseRefs(cwd?: string): boolean {
-  return gitMaybe(['config', '--bool', 'core.ignorecase'], { cwd }) === 'true';
+  const configured = gitMaybe(['config', '--bool', 'core.ignorecase'], { cwd });
+  if (configured === 'true' || configured === 'false') return configured === 'true';
+  const probe = path.join(commonGitDir(cwd), `vcsp-case-check-${process.pid}-${Date.now()}`);
+  const alias = probe.toUpperCase();
+  writeFileSync(probe, '');
+  try {
+    return probe !== alias && existsSync(alias);
+  } finally {
+    rmSync(probe, { force: true });
+  }
 }
 
 export function refExists(ref: string, cwd?: string): boolean {
