@@ -267,7 +267,8 @@ describe('attempts to get around the local rules', () => {
   });
 
   it('blocks a case-only variant of a protected branch on case-insensitive filesystems', () => {
-    if (gitOk(erin, 'config', '--bool', 'core.ignorecase') !== 'true') return; // Linux: MAIN is a separate branch
+    // Unset on case-sensitive filesystems (git config exits 1), where MAIN is a separate branch.
+    if (git(erin, 'config', '--bool', 'core.ignorecase').out.trim() !== 'true') return;
     const before = head(erin, 'main');
     const r = git(erin, 'update-ref', 'refs/heads/MAIN', localOnly('case'));
     expect(r.code, r.out).not.toBe(0);
