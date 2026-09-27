@@ -15,6 +15,8 @@ export interface RepoFacts {
   onRemoteDefault(sha: string, remote: string): boolean;
   /** True if `ancestor` is an ancestor of (or equal to) `descendant`. */
   isAncestor(ancestor: string, descendant: string): boolean;
+  /** Branch names are case-insensitive in this clone (`core.ignorecase`). */
+  ignoreCase?: boolean;
 }
 
 export type BlockKind =
@@ -67,7 +69,7 @@ export function evaluateRefUpdate(
 ): Decision {
   if (!update.ref.startsWith('refs/heads/')) return { action: 'allow', reason: 'not a local branch' };
   const branch = branchName(update.ref);
-  const rule = ruleFor(config, branch);
+  const rule = ruleFor(config, branch, { nocase: facts.ignoreCase });
   if (!rule) return { action: 'allow', reason: 'branch not protected' };
   if (isZero(update.newSha)) return { action: 'allow', reason: 'local branch deletion' };
   if (update.oldSha === update.newSha) return { action: 'allow', reason: 'no change' };

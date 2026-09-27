@@ -41,6 +41,10 @@ export function currentBranch(cwd?: string): string | null {
   return gitMaybe(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd });
 }
 
+export function ignoreCaseRefs(cwd?: string): boolean {
+  return gitMaybe(['config', '--bool', 'core.ignorecase'], { cwd }) === 'true';
+}
+
 export function refExists(ref: string, cwd?: string): boolean {
   return gitOk(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd });
 }

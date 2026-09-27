@@ -5,6 +5,7 @@ import type { Config } from '../config/schema.js';
 import {
   currentBranch,
   gitPath,
+  ignoreCaseRefs,
   inProgressOperation,
   isAncestor,
   isSha,
@@ -50,6 +51,7 @@ export function liveFacts(pending: Map<string, string>): RepoFacts {
       return !!ref && contains(tipOf(ref), sha);
     },
     isAncestor: (a, d) => isAncestor(a, d),
+    ignoreCase: ignoreCaseRefs(),
   };
 }
 
