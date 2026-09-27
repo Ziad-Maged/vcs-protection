@@ -28,6 +28,11 @@ describe('pattern matching', () => {
     expect(isProtected(config, 'feature/x')).toBe(false);
     expect(isProtected(config, 'mainline')).toBe(false);
   });
+
+  it('can match protected branches case-insensitively for case-insensitive clones', () => {
+    expect(isProtected(config, 'MAIN')).toBe(false);
+    expect(isProtected(config, 'MAIN', { nocase: true })).toBe(true);
+  });
 });
 
 describe('evaluateRefUpdate', () => {
@@ -60,6 +65,15 @@ describe('evaluateRefUpdate', () => {
     expect(evaluateRefUpdate(upd(Z, B, 'refs/heads/release/2.0'), config, facts)).toMatchObject({
       action: 'block',
       kind: 'create',
+    });
+  });
+
+  it('treats case-only variants as protected when the clone ignores case', () => {
+    expect(evaluateRefUpdate(upd(Z, B, 'refs/heads/MAIN'), config, facts).action).toBe('allow');
+    expect(evaluateRefUpdate(upd(Z, B, 'refs/heads/MAIN'), config, { ...facts, ignoreCase: true })).toMatchObject({
+      action: 'block',
+      kind: 'create',
+      branch: 'MAIN',
     });
   });
 
