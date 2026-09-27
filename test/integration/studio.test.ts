@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -113,7 +113,9 @@ describe('studio: security', () => {
 describe('studio: actions', () => {
   it('reports the state of a repository without rules', async () => {
     const st = (await api(studio, '/api/state')).json();
-    expect(st.repo.root).toBe(repo);
+    // git prints the canonical root: symlinks resolved (/var -> /private/var on macOS),
+    // 8.3 short names expanded and forward slashes on Windows.
+    expect(path.resolve(st.repo.root)).toBe(realpathSync.native(repo));
     expect(st.repo.rules).toBeNull();
     expect(st.repo.hooks.list).toHaveLength(6);
     expect(st.global.installed).toBe(false);
